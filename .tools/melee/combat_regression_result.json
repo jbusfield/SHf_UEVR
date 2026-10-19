@@ -1,0 +1,11 @@
+{
+    "execTime_ms":  23.0945,
+    "output":  [
+
+               ],
+    "result":  {
+                   "disabled":  "PASS: light/heavy native data and stamina, focus/counter input edges, native animation ownership, gesture windows, deduplication, contact cleanup and lifecycle",
+                   "enabled":  "PASS: light/heavy native data and stamina, focus/counter input edges, native animation ownership, gesture windows, deduplication, contact cleanup and lifecycle"
+               },
+    "success":  true
+}

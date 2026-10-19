@@ -1,0 +1,29 @@
+{
+    "execTime_ms":  16.1329,
+    "output":  [
+
+               ],
+    "result":  {
+                   "after":  {
+                                 "idle":  {
+                                              "counter":  1000,
+                                              "focus":  0,
+                                              "pawn":  1000,
+                                              "properties":  0,
+                                              "weapon":  1000
+                                          },
+                                 "reconfigureProperties":  0
+                             },
+                   "before":  {
+                                  "idle":  {
+                                               "counter":  1000,
+                                               "focus":  1000,
+                                               "pawn":  2000,
+                                               "properties":  0,
+                                               "weapon":  2000
+                                           },
+                                  "reconfigureProperties":  20
+                              }
+               },
+    "success":  true
+}
