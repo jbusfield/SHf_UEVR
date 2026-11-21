@@ -7,26 +7,25 @@ local ui = require('libs/ui')
 local M = {}
 local ATTACK_ID = 22100 -- Separate from the animation notify's attack IDs.
 local RADIUS_RATIO = 0.25 -- Keep the native capsule length, narrow its contact radius.
+-- Native traces whose sphere around a character-mesh socket stands in for a long body part. The large claw's
+-- ClawG_Default is 40 cm around hand_large_r; narrowed by RADIUS_RATIO it reaches none of the claw. Its capsule runs
+-- along the VR hand mesh instead, from the wrist to the middle fingertip (53 cm); a 12 cm radius takes in the index
+-- and ring fingertips. Keyed by trace family.
+local REACH_CAPSULES = {ClawG = {base = 'hand_large_r', tip = 'middle_04_large_r', radius = 12}}
 local MAX_FRAME_DELTA = 0.1
 local MAX_POSE_STEP = 100 -- cm; reject tracking jumps and teleports.
 local TRIGGER_THRESHOLD = 30 -- XInput's standard trigger dead zone.
 local state = {}
 local configurationCache = {}
+local noOwnRecords = {} -- weapon names found to have no records of their own (see configureWeapon)
 -- Input edges survive weapon/configuration resets; a held button is not a new press.
 local controls = {rbDown = false, rtDown = false, heavyHeld = false}
 local enabled = true
 local library
 local characterClass
-local stats = {swings = 0, contacts = 0, damageCalls = 0}
 local HIT_OUTPUTS = {'OutHits.Component', 'OutHits.ImpactPoint', 'OutHits.Time'}
 local WEAPON_PATH, MESH_PATH, TRACE_PATH = {'CurrentWeapon'}, {'WeaponMesh'}, {'NoceAttackTrace'}
-local diagnosticBudget = 24 -- Bounded logging for the next physical-contact test.
-
-local function diagnostic(message)
-    if diagnosticBudget <= 0 then return end
-    diagnosticBudget = diagnosticBudget - 1
-    uevr.params.functions.log_info('[melee] ' .. message)
-end
+local ANIM_PATH = {'PlayerAnimInstance'}
 
 local function clearHitStop(character)
     local time = uevrUtils.getValid(character, {'NoceTime'})
@@ -37,10 +36,6 @@ end
 
 local function endSwing(preserveNativeAttack)
     local trace = uevrUtils.getValid(state.activeTrace)
-    if trace ~= nil then
-        diagnostic('swing ended; sweeps=' .. (state.sweeps or 0) .. ' contacts=' .. stats.contacts
-            .. ' damageCalls=' .. stats.damageCalls)
-    end
     state.activeTrace = nil
     state.hitActors = nil
     if trace ~= nil then
@@ -59,7 +54,7 @@ end
 
 local function resetLevel()
     reset()
-    configurationCache = {}
+    configurationCache, noOwnRecords = {}, {}
     library, characterClass = nil, nil
 end
 
@@ -89,42 +84,79 @@ local function getHeldWeapon(player)
     local weapon = uevrUtils.getValid(player, WEAPON_PATH)
     local mesh = uevrUtils.getValid(weapon, MESH_PATH)
     local held = attachments.getCurrentGrippedAttachment(Handed.Right)
-    if mesh == nil or held == nil or mesh:get_address() ~= held:get_address() then return end
-    if not weapon:IsVisible() or weapon:IsBroken() then return end
+    if weapon == nil or mesh == nil or held == nil or mesh:get_address() ~= held:get_address() then return nil end
+    if not weapon:IsVisible() or weapon:IsBroken() then return nil end
     return weapon, mesh
 end
 getHeldWeapon = uevrUtils.profiler:wrap('MELEE: getHeldWeapon', getHeldWeapon)
 
-local function configureWeapon(player, weapon, mesh, trace)
-    -- Motion families share native combo/trace names (e.g. Pipe_ComboL / Pipe_Default).
-    local family = weapon.CounterComboName:to_string():match('^([^_]+)_')
-    local traceName = family and (family .. '_Default')
-    local data = uevrUtils.getValid(player, {'NocePlayerAttackInfo', 'PlayerComboDataAsset'})
-    if family == nil or data == nil then return false end
-    local dataAddress, traceAddress = data:get_address(), trace:get_address()
+-- A family's configuration made earlier for the same combo data and trace: true or false as configureWeapon returns,
+-- or nil when there is none.
+local function applyCachedConfiguration(family, mesh, dataAddress, traceAddress)
     local cached = configurationCache[family]
-    if cached ~= nil and cached.dataAddress == dataAddress and cached.traceAddress == traceAddress then
-        if not mesh:DoesSocketExist(cached.config.socket) then return false end
-        for key, value in pairs(cached.config) do state[key] = value end
-        return true
-    end
+    if cached == nil or cached.dataAddress ~= dataAddress or cached.traceAddress ~= traceAddress then return nil end
+    if cached.config.socket ~= nil and not mesh:DoesSocketExist(cached.config.socket) then return false end
+    for key, value in pairs(cached.config) do state[key] = value end
+    return true
+end
 
-    local comboName, heavyName = family .. '_ComboL', family .. '_ComboH'
-    -- Read only this family's records; the full combo map contains every weapon.
-    local settings = plugin.getProperty(trace, 'AttackTraceInfoMap[' .. traceName .. ']')
-    local combo = plugin.getProperty(data, 'PlayerComboSettingMap[' .. comboName .. ']')
-    if settings == nil or combo == nil or not settings.UseSocketInWeapon then
-        uevrUtils.print('[melee] No native melee settings for ' .. weapon.WeaponName:to_string(), LogLevel.Warning)
+-- A family's trace and light combo records (<family>_Default, <family>_ComboL), or nil. Read only these records; the
+-- full combo map contains every weapon.
+local function readRecords(trace, data, family)
+    local settings = plugin.getProperty(trace, 'AttackTraceInfoMap[' .. family .. '_Default]')
+    if settings == nil then return nil end
+    local combo = plugin.getProperty(data, 'PlayerComboSettingMap[' .. family .. '_ComboL]')
+    if combo == nil then return nil end
+    return settings, combo
+end
+
+local function configureWeapon(player, weapon, mesh, trace)
+    local data = uevrUtils.getValid(player, {'NocePlayerAttackInfo', 'PlayerComboDataAsset'})
+    if data == nil then return false end
+    local dataAddress, traceAddress = data:get_address(), trace:get_address()
+    -- A weapon with records under its own name uses them: the large claw (WeaponName ClawG) is the fox arm's weapon, with
+    -- its CounterComboName (Claw_ComboCounter), but has ClawG_Default and ClawG_ComboL. Other weapons use their motion
+    -- family's records (e.g. Pipe_ComboL / Pipe_Default).
+    local name = weapon.WeaponName:to_string()
+    local motionFamily = weapon.CounterComboName:to_string():match('^([^_]+)_')
+    local family, settings, combo = nil, nil, nil
+    if not noOwnRecords[name] then
+        local applied = applyCachedConfiguration(name, mesh, dataAddress, traceAddress)
+        if applied ~= nil then return applied end
+        settings, combo = readRecords(trace, data, name)
+        if settings ~= nil then family = name else noOwnRecords[name] = true end
+    end
+    if family == nil then
+        if motionFamily == nil then return false end
+        local applied = applyCachedConfiguration(motionFamily, mesh, dataAddress, traceAddress)
+        if applied ~= nil then return applied end
+        family = motionFamily
+        settings, combo = readRecords(trace, data, family)
+    end
+    if settings == nil then
+        uevrUtils.print('[melee] No native melee settings for ' .. name, LogLevel.Warning)
         return false
     end
+    local traceName = family .. '_Default'
+    local comboName, heavyName = family .. '_ComboL', family .. '_ComboH'
 
-    local socket = uevrUtils.fname_from_string(settings.Socket)
-    if not mesh:DoesSocketExist(socket) then return false end
+    -- Body-part weapons (the claw) trace from a character-mesh socket and their weapon mesh is
+    -- empty. The grip attaches that mesh to the VR hand socket, so its own transform is the pose.
+    local socket = nil
+    if settings.UseSocketInWeapon then
+        socket = uevrUtils.fname_from_string(settings.Socket)
+        if not mesh:DoesSocketExist(socket) then return false end
+    end
     local config = {socket = socket, traceName = uevrUtils.fname_from_string(traceName),
         comboName = uevrUtils.fname_from_string(comboName), comboString = comboName, combo = combo,
         radius = settings.Radius * RADIUS_RATIO, halfHeight = settings.HalfHeight,
         objectTypes = plugin.getProperty(trace, 'ObjectTypes'),
         traceChannel = trace.ECollisionQueryChannel, skipTag = trace.SkipAttackTraceTag}
+    local reach = REACH_CAPSULES[family]
+    if reach ~= nil then
+        config.reach = {base = uevrUtils.fname_from_string(reach.base), tip = uevrUtils.fname_from_string(reach.tip)}
+        config.radius = reach.radius
+    end
     config.light = {combo = combo, name = config.comboName, text = comboName,
         stamina = uevrUtils.fname_from_string(family == 'Pipe' and 'Pipe_LightAttack_1' or comboName), input = 1}
     local heavyCombo = plugin.getProperty(data, 'PlayerComboSettingMap[' .. heavyName .. ']')
@@ -140,7 +172,6 @@ local function configureWeapon(player, weapon, mesh, trace)
     if library == nil or characterClass == nil then return false end
     configurationCache[family] = {dataAddress = dataAddress, traceAddress = traceAddress, config = config}
     for key, value in pairs(config) do state[key] = value end
-    diagnostic('ready: ' .. comboName .. ' socket=' .. settings.Socket)
     return true
 end
 configureWeapon = uevrUtils.profiler:wrap('MELEE: configureWeapon', configureWeapon)
@@ -162,16 +193,9 @@ local function damageContacts(player, weapon, previous, pose, damage)
     if handActor ~= nil then ignored[#ignored + 1] = handActor end
     -- Keep FHitResult native: reconstructing its weak references in Lua loses body/bone data.
     local result = plugin.executeFunctionWithHandle(library, 'CapsuleTraceMultiForObjects', 'OutHits', HIT_OUTPUTS,
-        player, previous.location, pose.location, state.radius, state.halfHeight, pose.rotation,
+        player, previous.location, pose.location, state.radius, pose.halfHeight or state.halfHeight, pose.rotation,
         state.objectTypes, false, ignored, 0, {}, true, {}, {}, 0)
-    state.sweeps = (state.sweeps or 0) + 1
-    if result == nil then
-        if not state.reportedTraceError then
-            state.reportedTraceError = true
-            diagnostic('capsule trace returned no bridge response')
-        end
-        return
-    end
+    if result == nil then return end
     if type(result.handle) ~= 'number' or type(result.OutHits) ~= 'table' then
         plugin.releaseHandle(result.handle)
         return
@@ -186,34 +210,26 @@ local function damageContacts(player, weapon, previous, pose, damage)
         for _, contact in ipairs(ordered) do
             local component = hitComponent(contact.hit.Component)
             local target = component and uevrUtils.getValid(component:GetOwner())
-            if target ~= nil and target:get_address() ~= player:get_address()
+            if component ~= nil and target ~= nil and target:get_address() ~= player:get_address()
                 and target:get_address() ~= weapon:get_address() then
                 local skip = target:ActorHasTag(state.skipTag) or component:ComponentHasTag(state.skipTag)
                 if skip then goto nextContact end
                 if not target:is_a(characterClass) then
                     -- Object traces also return overlaps/ignored collision responses. Only
                     -- geometry that blocks the game's attack channel can stop the weapon.
-                    local blocking = component:GetCollisionResponseToChannel(state.traceChannel) == 2
-                    if not state.reportedObstacle then
-                        state.reportedObstacle = true
-                        diagnostic('environment contact: ' .. target:get_full_name() .. ' blocking=' .. tostring(blocking))
-                    end
-                    if blocking then break end
+                    if component:GetCollisionResponseToChannel(state.traceChannel) == 2 then break end
                     goto nextContact
                 end
                 local address = target:get_address()
                 if not state.hitActors[address] then
                     state.hitActors[address] = true
-                    stats.contacts = stats.contacts + 1
                     local dx = pose.location.X - previous.location.X
                     local dy = pose.location.Y - previous.location.Y
                     local dz = pose.location.Z - previous.location.Z
                     local length = math.sqrt(dx * dx + dy * dy + dz * dz)
                     local point = contact.hit.ImpactPoint
                     local angle = library:CalculateDamageDirectionAngle(target, uevrUtils.vector(point))
-                    local healthBefore = target:GetHealth()
-                    local damageStart = os.clock()
-                    local applied = plugin.executeFunctionWithOutputs(target, 'OnDamaged', {}, {
+                    plugin.executeFunctionWithOutputs(target, 'OnDamaged', {}, {
                         Instigator = player,
                         HitResult = plugin.handleParam(result.handle, nil, contact.index),
                         ComboName = state.comboString,
@@ -229,29 +245,64 @@ local function damageContacts(player, weapon, previous, pose, damage)
                         WeaponName = weapon.WeaponName:to_string(),
                         WeaponMotionType = weapon:GetWeaponMotionType(),
                     })
-                    if applied ~= nil then stats.damageCalls = stats.damageCalls + 1 end
                     -- Vanilla hit stop nearly freezes the enemy for 200 ms. A physical VR
                     -- weapon keeps moving, so let the native reaction proceed immediately.
                     clearHitStop(target)
-                    diagnostic(string.format('damage: %s health=%.1f->%.1f call_ms=%.3f dilation=%.3f',
-                        target:get_full_name(), healthBefore, target:GetHealth(),
-                        (os.clock() - damageStart) * 1000, target.CustomTimeDilation))
                 end
             end
             ::nextContact::
         end
     end)
     plugin.releaseHandle(result.handle)
+    -- Once per swing: a failure here would otherwise repeat every tick of the swing.
     if not ok and not state.reportedError then
         state.reportedError = true
-        diagnostic('contact processing failed: ' .. tostring(err))
+        uevr.params.functions.log_error('[melee] contact processing failed: ' .. tostring(err))
     end
 end
 damageContacts = uevrUtils.profiler:wrap('MELEE: damageContacts', damageContacts)
 
+-- The reach capsule (see REACH_CAPSULES) on the VR hand mesh the weapon mesh is gripped to: centred between the wrist
+-- and the fingertip, with its axis (the capsule's Z) along them.
+local function getReachPose(mesh)
+    local hand = uevrUtils.getValid(mesh:GetAttachParent())
+    if hand == nil then return nil end
+    -- The hands are rebuilt when the arm form changes, under the same weapon mesh.
+    local address = hand:get_address()
+    if state.reachHand ~= address then
+        state.reachHand = address
+        state.reachHandValid = hand:DoesSocketExist(state.reach.base) and hand:DoesSocketExist(state.reach.tip)
+    end
+    if not state.reachHandValid then return nil end
+    -- Copy each returned struct before the next call.
+    local base = hand:GetSocketLocation(state.reach.base)
+    local bx, by, bz = base.X, base.Y, base.Z
+    local tip = hand:GetSocketLocation(state.reach.tip)
+    local dx, dy, dz = tip.X - bx, tip.Y - by, tip.Z - bz
+    local length = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if length <= 0 then return nil end
+    -- Pitching a rotator 90 degrees down puts its Z axis where its X axis pointed.
+    return {
+        location = {X = bx + dx * 0.5, Y = by + dy * 0.5, Z = bz + dz * 0.5},
+        rotation = {Pitch = math.deg(math.asin(dz / length)) - 90, Yaw = math.deg(math.atan(dy, dx)), Roll = 0},
+        halfHeight = length * 0.5 + state.radius,
+    }
+end
+
 local function getPose(mesh)
-    local location = mesh:GetSocketLocation(state.socket)
-    local rotation = mesh:GetSocketRotation(state.socket)
+    if state.reach ~= nil then
+        local pose = getReachPose(mesh)
+        if pose ~= nil then return pose end
+    end
+    local location, rotation
+    if state.socket ~= nil then
+        location = mesh:GetSocketLocation(state.socket)
+        rotation = mesh:GetSocketRotation(state.socket)
+    else
+        -- No socket in the weapon mesh: the mesh itself sits on the hand socket (see configureWeapon).
+        location = mesh:K2_GetComponentLocation()
+        rotation = mesh:K2_GetComponentRotation()
+    end
     -- Copy values: Unreal's returned structs must not be retained between ticks.
     return {
         location = {X = location.X, Y = location.Y, Z = location.Z},
@@ -261,7 +312,9 @@ end
 getPose = uevrUtils.profiler:wrap('MELEE: getPose', getPose)
 
 local function checkNativeAttack(player)
-    return player:InAttackStateMachine() or player:InCounterState() or player:InFocusAttack()
+    -- The broad attack-state flag can be true while idle and accepting attacks.
+    -- Only native special attacks take ownership of the physical swing window.
+    return player:InCounterState() or player:InFocusAttack()
 end
 checkNativeAttack = uevrUtils.profiler:wrap('MELEE: checkNativeAttack', checkNativeAttack)
 
@@ -304,13 +357,15 @@ local function update(delta)
 
     local playerAddress, weaponAddress = player:get_address(), weapon:get_address()
     local meshAddress, traceAddress = mesh:get_address(), trace:get_address()
+    -- The claw keeps its weapon between forms; only its name changes (Claw / ClawG, see configureWeapon).
+    local weaponName = weapon.WeaponName:to_string()
     if state.playerAddress ~= playerAddress or state.weaponAddress ~= weaponAddress
-        or state.meshAddress ~= meshAddress or state.traceAddress ~= traceAddress then
+        or state.meshAddress ~= meshAddress or state.traceAddress ~= traceAddress or state.weaponName ~= weaponName then
         -- Gesture begin can arrive before the first weapon configuration.
         local opening = state.weaponAddress == nil and state.windowOpen
         local heavy = state.swingHeavy
         reset()
-        state.playerAddress, state.weaponAddress = playerAddress, weaponAddress
+        state.playerAddress, state.weaponAddress, state.weaponName = playerAddress, weaponAddress, weaponName
         state.meshAddress, state.traceAddress = meshAddress, traceAddress
         state.configured = configureWeapon(player, weapon, mesh, trace)
         state.windowOpen = opening
@@ -339,7 +394,9 @@ local function update(delta)
     if not state.windowOpen then return end
 
     if state.activeTrace == nil then
-        local selected = state.swingHeavy and state.heavy or not state.swingHeavy and state.light
+        -- A heavy swing with no heavy combo is rejected, not played as a light one.
+        local selected
+        if state.swingHeavy then selected = state.heavy else selected = state.light end
         if selected == nil or not player:CanAccepInputActionAttack(false)
             or not player:CanAcceptInputByStaminaStatus(selected.input) then
             state.windowOpen = false
@@ -353,10 +410,7 @@ local function update(delta)
         trace:StartTraceByAttackID(ATTACK_ID)
         state.activeTrace = trace
         state.hitActors = {}
-        state.sweeps = 0
-        state.reportedObstacle = false
-        stats.swings = stats.swings + 1
-        diagnostic('swing ' .. stats.swings .. ' began')
+        state.reportedError = false
     end
     local attack = plugin.executeFunction(weapon, 'GetAttackInfo', weapon:GetDurability(), 0, 0, 0)
     if attack == nil then return end
@@ -366,9 +420,21 @@ local function update(delta)
         wince = state.combo.Wince * attack.WinceMultiplier,
     }
     -- Native trace retains durability, environment contact and deflection handling.
+    -- OnDeflect also queues an animated recoil when a weapon breaks. Physical melee
+    -- has no animation attack state to finish that recoil, so retain the pre-trace request.
+    local anim = uevrUtils.getValid(player, ANIM_PATH)
+    local previousType = anim and anim.AnimStateType
+    local previousAttack = anim and anim.CanEnterAttack
     trace:DoTraceByAttackID(ATTACK_ID, state.comboName, state.traceName,
         uevrUtils.vector(previous.location), uevrUtils.rotator(previous.rotation),
         uevrUtils.vector(pose.location), uevrUtils.rotator(pose.rotation), RADIUS_RATIO)
+    if anim ~= nil and anim.CanEnterAttack then
+        local queuedType = anim.AnimStateType
+        if (queuedType == 7 or queuedType == 8) -- Deflect_L / Deflect_H
+            and (queuedType ~= previousType or not previousAttack) then
+            anim.AnimStateType, anim.CanEnterAttack = previousType, previousAttack
+        end
+    end
     -- OnHit's damage listener exists only during the vanilla attack state. Forward real
     -- physical contacts to the same character damage entry point without entering that state.
     damageContacts(player, weapon, previous, pose, damage)
@@ -378,20 +444,20 @@ update = uevrUtils.profiler:wrap('MELEE: update', update)
 
 -- Gesture callbacks own the window, as in DI2/FK. Physical contacts inside it
 -- drive native damage; neither window boundary waits for an attack animation.
-gestures.registerSwingBeginCallback(function(strength, hand)
+gestures.registerSwingBeginCallback(function(_, hand)
     if hand == Handed.Right then M.beginSwing() end
 end, true, false)
 
-gestures.registerSwingEndCallback(function(strength, hand)
+gestures.registerSwingEndCallback(function(_, hand)
     if hand == Handed.Right then M.endSwing() end
 end, true, false)
 
 -- Use the weapon's updated socket pose after the engine tick.
-uevr.sdk.callbacks.on_post_engine_tick(function(engine, delta)
+uevr.sdk.callbacks.on_post_engine_tick(function(_, delta)
     update(delta)
 end)
 
-local function updateInput(retval, user_index, inputState)
+local function updateInput(_, _, inputState)
     local rbDown = uevrUtils.isButtonPressed(inputState, XINPUT_GAMEPAD_RIGHT_SHOULDER)
     local rtDown = inputState.Gamepad.bRightTrigger > TRIGGER_THRESHOLD
     local rbPressed, rtPressed = rbDown and not controls.rbDown, rtDown and not controls.rtDown
@@ -401,8 +467,10 @@ local function updateInput(retval, user_index, inputState)
     if not rtDown then controls.passRT = false end
     -- Releases are already represented by the raw input. Idle input needs no UObject reads.
     if not rbDown and not rtDown then return end
-    if not isGameplayActive() then controls.passRB, controls.passRT = false, false; return end
-    if state.configured ~= true then controls.passRB, controls.passRT = false, false; return end
+    if not isGameplayActive() or state.configured ~= true then
+        controls.passRB, controls.passRT = false, false
+        return
+    end
     local player = uevr.api:get_local_pawn(0)
     local held = attachments.getCurrentGrippedAttachment(Handed.Right)
     if player == nil or player:get_address() ~= state.playerAddress
@@ -438,13 +506,5 @@ uevrUtils.registerOnPostInputGetStateCallback(updateInput)
 
 uevrUtils.registerPreLevelChangeCallback(resetLevel)
 uevr.params.sdk.callbacks.on_script_reset(resetLevel)
-
-uevr.sdk.callbacks.on_lua_event(function(event)
-    if event == 'SHf_MeleeStatus' then
-        uevr.params.functions.log_info('[melee] configured=' .. tostring(state.configured)
-            .. ' swinging=' .. tostring(state.activeTrace ~= nil) .. ' swings=' .. stats.swings
-            .. ' contacts=' .. stats.contacts .. ' damageCalls=' .. stats.damageCalls)
-    end
-end)
 
 return M

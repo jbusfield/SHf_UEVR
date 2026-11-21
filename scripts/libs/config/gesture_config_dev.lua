@@ -112,6 +112,25 @@ local parameterDefaults = {
 			triggerDistance = 25.0,
 			forwardDotThreshold = 0.8,
 		},
+		mouthEyesBoundary = -11.0,
+		eyesHeadBoundary = 7.0,
+		eyeZone = {
+			minForward = 0.0,
+			maxForward = 20.0,
+			maxSide = 8.0,
+		},
+		mouthZone = {
+			minForward = 0.0,
+			maxForward = 20.0,
+			maxSide = 8.0,
+			minUp = -24.0,
+		},
+		headZone = {
+			minForward = -15.0,
+			maxForward = 15.0,
+			maxSide = 12.0,
+			maxUp = 30.0,
+		},
 	},
 	componentGrab = {
 		maxDistance = 10.0,
@@ -147,12 +166,13 @@ local swingHelpLines = {
 }
 
 local flickHelpLines = {
-	"Min Angle Speed (deg/s) - How fast the controller tip must rotate before a flick counts. Higher = ignore slow tip tilts; lower = easier to trigger with a light wrist snap.",
+	"Min Angle Speed (deg/s) - World: peak tip speed. Raw: full wrist rotation averaged over 50 ms. Higher = require a faster flick; lower = allow slower flicks and preparation movements. Raw recognition fires once rotation speed, sweep and hand direction qualify.",
 	"Max Angle Speed (deg/s) - Caps how hard a flick feels for strength (0-1). Does not block detection. Higher = need a faster snap to reach full strength; lower = moderate snaps report as strong.",
 	"Up Min / Up Max Angle Speed (deg/s) - Same as Min / Max Angle Speed, but used for flick-up. The Min / Max values above then apply to flick down only.",
-	"Min Angle Delta (deg) - Minimum tip-direction change across the motion. Higher = require a bigger wrist turn; lower = allow smaller snaps.",
-	"Up Dot Threshold (0-1) - How closely the tip must finish pointing upward to count as flick-up / yank. Higher = must finish more straight up; lower = allow a wider upward cone.",
-	"Cooldown (sec) - How long after a flick before another can fire. Higher = fewer rapid repeats; lower = can chain flicks sooner.",
+	"Min Angle Delta (deg) - World: accumulated tip travel. Raw: full controller orientation change during a coherent fast stroke. Slow preparation and rebound do not add together.",
+	"Up Dot Threshold (0-1) - World: how closely the tip points upward at peak speed. Raw: how closely the hand moves upward during the flick. Higher = a narrower upward cone. Both methods use this same value.",
+	"Cooldown (sec) - Minimum time between flicks. Raw also requires 80 ms of rest before rearming, preventing rebound casts even with zero cooldown.",
+	"Raw uses controller poses only, with a 50 ms rotation-speed window and up to 40 ms speed dips in a stroke. A fast stroke lasts at most 0.4 sec. Hand movement supplies direction, with 0.5 cm required to reject stationary pose jitter; wrist rotation supplies speed and strength. Headset motion is never used. World detection retains its existing behavior.",
 }
 
 local blockHelpLines = {
@@ -163,6 +183,14 @@ local blockHelpLines = {
 	"Max Controller Tilt (deg) - How much the controller may tip up or down from horizontal (wrist / forearm pitch). Higher = allow a steeper forearm; lower = forearm must stay more level.",
 	"Palm Facing Away (0-1) - How strongly the palm must face away from you (toward the threat), not down or toward you. Higher = stricter \"shield facing out\"; lower = allow a lazier / more rotated wrist.",
 	"Release Slack (0-1) - How sticky the pose is when leaving it (hysteresis on all checks). Higher = stays active longer as you drift out of the ideal pose; lower = snaps off quickly.",
+}
+
+local faceZoneHelpLines = {
+	"Box zones measure the controller's offset from the headset in cm along the headset's own forward, side and up axes, so each zone keeps its size at any distance. The controller origin sits in the handle, usually a few cm below and behind the part that touches the face.",
+	"Height bands - Mouth runs from Mouth Min Up to the Mouth / Eyes Boundary, Eyes from that boundary to the Eyes / Head Boundary, and Head from that boundary to Head Max Up. Height is above (positive) or below (negative) the eye line. The bands cannot overlap: moving a boundary grows one zone and shrinks its neighbor.",
+	"Min / Max Forward (cm) - How far in front of the headset the controller may be (negative = behind it).",
+	"Max Side (cm) - How far to either side of the headset's center line the controller may be.",
+	"Test - Shows Active while a grip or trigger is pressed with the hand in that zone.",
 }
 
 -- Collapsed Help tree for a gesture section. Usage: expandArray(getGestureHelpWidgets, "block", blockHelpLines)
@@ -333,6 +361,8 @@ local function getConfigWidgets(m_paramManager)
 			floatWidget({"flick", "minAngleDelta"}, "Min Angle Delta (deg)", 0.5, {0, 180}),
 			floatWidget({"flick", "upDotThreshold"}, "Up Dot Threshold (0-1)", 0.01, {0, 1}),
 			floatWidget({"flick", "cooldownTime"}, "Cooldown (sec)", 0.01, {0, 10}),
+			{ widgetType = "text", id = widgetPrefix .. "flick_sample_left", label = "Left: enable a flick test to measure peak speed and required threshold." },
+			{ widgetType = "text", id = widgetPrefix .. "flick_sample_right", label = "Right: enable a flick test to measure peak speed and required threshold." },
 		expandArray(getGestureHelpWidgets, "flick", flickHelpLines),
 		{ widgetType = "tree_pop" },
 
@@ -466,6 +496,51 @@ local function getConfigWidgets(m_paramManager)
 				floatWidget({"face", "ear", "triggerDistance"}, "Trigger Distance", 0.5, {0, 200}),
 				floatWidget({"face", "ear", "forwardDotThreshold"}, "Forward Dot Threshold", 0.01, {-1, 1}),
 			{ widgetType = "tree_pop" },
+			{
+				widgetType = "tree_node",
+				id = widgetPrefix .. "face_zone_tree",
+				initialOpen = true,
+				label = "Box Zones (Eye / Mouth / Head Zone)"
+			},
+				floatWidget({"face", "eyesHeadBoundary"}, "Eyes / Head Boundary (cm)", 0.5, {-50, 50}),
+				floatWidget({"face", "mouthEyesBoundary"}, "Mouth / Eyes Boundary (cm)", 0.5, {-50, 50}),
+				{
+					widgetType = "tree_node",
+					id = widgetPrefix .. "face_eye_zone_tree",
+					initialOpen = true,
+					label = "Eye Zone"
+				},
+				expandArray(getGestureTestWidgets, "face_eye_zone"),
+					floatWidget({"face", "eyeZone", "minForward"}, "Min Forward (cm)", 0.5, {-50, 50}),
+					floatWidget({"face", "eyeZone", "maxForward"}, "Max Forward (cm)", 0.5, {-50, 50}),
+					floatWidget({"face", "eyeZone", "maxSide"}, "Max Side (cm)", 0.5, {0, 50}),
+				{ widgetType = "tree_pop" },
+				{
+					widgetType = "tree_node",
+					id = widgetPrefix .. "face_mouth_zone_tree",
+					initialOpen = true,
+					label = "Mouth Zone"
+				},
+				expandArray(getGestureTestWidgets, "face_mouth_zone"),
+					floatWidget({"face", "mouthZone", "minForward"}, "Min Forward (cm)", 0.5, {-50, 50}),
+					floatWidget({"face", "mouthZone", "maxForward"}, "Max Forward (cm)", 0.5, {-50, 50}),
+					floatWidget({"face", "mouthZone", "maxSide"}, "Max Side (cm)", 0.5, {0, 50}),
+					floatWidget({"face", "mouthZone", "minUp"}, "Min Up (cm)", 0.5, {-80, 0}),
+				{ widgetType = "tree_pop" },
+				{
+					widgetType = "tree_node",
+					id = widgetPrefix .. "face_head_zone_tree",
+					initialOpen = true,
+					label = "Head Zone"
+				},
+				expandArray(getGestureTestWidgets, "face_head_zone"),
+					floatWidget({"face", "headZone", "minForward"}, "Min Forward (cm)", 0.5, {-50, 50}),
+					floatWidget({"face", "headZone", "maxForward"}, "Max Forward (cm)", 0.5, {-50, 50}),
+					floatWidget({"face", "headZone", "maxSide"}, "Max Side (cm)", 0.5, {0, 50}),
+					floatWidget({"face", "headZone", "maxUp"}, "Max Up (cm)", 0.5, {0, 80}),
+				{ widgetType = "tree_pop" },
+				expandArray(getGestureHelpWidgets, "face_zone", faceZoneHelpLines),
+			{ widgetType = "tree_pop" },
 		{ widgetType = "tree_pop" },
 
 		{
@@ -516,6 +591,9 @@ local GESTURE_PUSH_TWO_HANDED = 22
 local GESTURE_FLICK = 23
 local GESTURE_FLICK_UP = 24
 local GESTURE_SWING = 25
+local GESTURE_EYE_ZONE_GRIP = 26
+local GESTURE_MOUTH_ZONE_GRIP = 28
+local GESTURE_HEAD_ZONE_GRIP = 30
 local MOMENTARY_ACTIVE_MS = 500
 
 local gestureTests = {}
@@ -743,6 +821,21 @@ registerGestureTest("face_ear", GESTURE_EARGRAB, {
 	combineCallbacks = true,
 	callbacks = { "on_gesture_eargrab", "on_gesture_earscratch" },
 })
+registerGestureTest("face_eye_zone", GESTURE_EYE_ZONE_GRIP, {
+	momentary = false,
+	combineCallbacks = true,
+	callbacks = { "on_gesture_eye_zone_grip", "on_gesture_eye_zone_trigger" },
+})
+registerGestureTest("face_mouth_zone", GESTURE_MOUTH_ZONE_GRIP, {
+	momentary = false,
+	combineCallbacks = true,
+	callbacks = { "on_gesture_mouth_zone_grip", "on_gesture_mouth_zone_trigger" },
+})
+registerGestureTest("face_head_zone", GESTURE_HEAD_ZONE_GRIP, {
+	momentary = false,
+	combineCallbacks = true,
+	callbacks = { "on_gesture_head_zone_grip", "on_gesture_head_zone_trigger" },
+})
 
 local function setUIValue(pathOrKey, value)
 	if type(pathOrKey) == "table" then
@@ -812,6 +905,54 @@ end
 
 uevrUtils.registerUEVRCallback("on_gesture_config_param_change", function(key, value)
 	setUIValue(key, value)
+end)
+
+local flickSampleCounts = {}
+uevrUtils.registerUEVRCallback("on_gesture_flick_sample", function(sample, hand)
+	-- Rejected motion stays in the frame history but is neither printed nor numbered.
+	if not sample.accepted then return end
+	local side = hand == Handed.Left and "left" or "right"
+	local label = hand == Handed.Left and "Left" or "Right"
+	flickSampleCounts[hand] = (flickSampleCounts[hand] or 0) + 1
+	local message = string.format(
+		"Last %s #%d flick (%s): %s accepted | %s %.0f / min %.0f deg/s | angle %.1f / min %.1f deg",
+		label, flickSampleCounts[hand], sample.source, sample.up and "up" or "down",
+		sample.speedLabel or "peak", sample.peakSpeed, sample.minSpeed, sample.angle, sample.minAngle)
+	configui.setLabel(widgetPrefix .. "flick_sample_" .. side, message)
+	-- Write directly to the UEVR log without enabling unrelated module logging.
+	uevr.params.functions.log_info("[flick test] " .. message)
+	local details = sample.details
+	if details then
+		uevr.params.functions.log_info(string.format(
+			"[flick test detail] %s #%d | peak frame %.2f deg / %.2f ms engine / %.2f ms clock | raw frame %.2f deg | active %d frames / %.1f ms | mean %.0f deg/s | net %.1f deg / travel %.1f deg",
+			label, flickSampleCounts[hand], details.peakFrameAngle or 0, (details.peakFrameDelta or 0) * 1000,
+			(details.peakClockDelta or 0) * 1000, details.peakRawAngle or -1,
+			details.frames, details.elapsed * 1000, details.elapsed > 0 and sample.angle / details.elapsed or 0,
+			details.netAngle, details.pathAngle or sample.angle))
+		if details.windowSpeed then
+			uevr.params.functions.log_info(string.format(
+				"[flick test raw] %s #%d | qualifying window %.1f deg/s over %.1f ms | rotation coherence %.3f",
+				label, flickSampleCounts[hand], details.windowSpeed, details.windowTime * 1000, details.alignment))
+		end
+		if details.verticalTravelCm then
+			uevr.params.functions.log_info(string.format(
+				"[flick test raw motion] %s #%d | hand vertical %.2f cm / %.1f cm/s | motion upDot %.3f",
+				label, flickSampleCounts[hand], details.verticalTravelCm, details.verticalSpeedCm, details.motionUpDot))
+		end
+	end
+	if sample.frames then
+		for i, frame in ipairs(sample.frames) do
+			uevr.params.functions.log_info(string.format(
+				"[flick test frame] %s #%d frame %d/%d | dt %.2f ms / clock %.2f ms | world/source %.3f deg / raw %.3f deg | speed %.1f deg/s | upDot %.3f",
+				label, flickSampleCounts[hand], i, #sample.frames, frame.delta * 1000,
+				(frame.clockDelta or 0) * 1000, frame.angle, frame.rawAngle or -1, frame.speed, frame.upDot))
+			if frame.verticalSpeedCm then
+				uevr.params.functions.log_info(string.format(
+					"[flick test raw frame] %s #%d frame %d/%d | hand vertical %.1f cm/s",
+					label, flickSampleCounts[hand], i, #sample.frames, frame.verticalSpeedCm))
+			end
+		end
+	end
 end)
 
 return M

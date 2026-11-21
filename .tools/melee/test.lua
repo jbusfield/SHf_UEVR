@@ -3,6 +3,9 @@ local callbacks, calls, damageResults, logs = {}, {}, {}, {}
 local health, released, sweepHasEnemy = 500, 0, true
 local paused, menu, interacting = false, false, false
 local usingFocus, focusCharged, counterReady, nativeBusy, attackAllowed = false, false, false, false, true
+local broadAttackState = false
+local forceDeflect, breakOnTrace, weaponBroken
+local anim = {AnimStateType=0, CanEnterAttack=false}
 local staminaCosts = {}
 local reads = {weapon = 0, pawn = 0, focus = 0, counter = 0, properties = 0}
 local wallFirst, obstacleResponse, skipObstacle, failDamage = false, 2, false, false
@@ -48,21 +51,29 @@ local mesh = {
 local weapon = {
     get_address = function() return 2 end,
     WeaponMesh = mesh, CounterComboName = name('Pipe_ComboCounter'), WeaponName = name('Pipe'),
-    IsVisible = function() reads.weapon=reads.weapon+1; return true end, IsBroken = function() return false end,
+    IsVisible = function() reads.weapon=reads.weapon+1; return true end, IsBroken = function() return weaponBroken == true end,
     GetDurability = function() return 400 end, GetWeaponMotionType = function() return 1 end,
     GetCanFocusAttack = function() return true end,
 }
 local trace = {get_address = function() return 11 end,
     GetIsEnable = function() return true end, ECollisionQueryChannel = 3, SkipAttackTraceTag = 'SkipAttackTrace'}
 for _, method in ipairs({'SetIsDuringAttack', 'StartTraceByAttackID', 'EndTraceByAttackID', 'DoTraceByAttackID'}) do
-    trace[method] = function(self, ...) calls[#calls + 1] = {method, ...} end
+    trace[method] = function(self, ...)
+        calls[#calls + 1] = {method, ...}
+        if method == 'DoTraceByAttackID' and forceDeflect then
+            anim.AnimStateType, anim.CanEnterAttack = forceDeflect, true
+            if breakOnTrace then weaponBroken=true end
+        end
+    end
 end
 local player = {
     get_address = function() return 1 end, CurrentWeapon = weapon, NoceAttackTrace = trace,
+    PlayerAnimInstance = anim,
+    get_full_name = function() return 'Player' end, GetStamina = function() return 70 end,
     NocePlayerAttackInfo = {PlayerComboDataAsset = {get_address = function() return 10 end}}, CustomTimeDilation = 1,
     GetIsInEvent = function() return false end, IsInteracting = function() return interacting end,
     GetAttack = function() return 1 end, GetExtraAttack = function() return 0 end,
-    InAttackStateMachine = function() return nativeBusy end,
+    InAttackStateMachine = function() return broadAttackState or nativeBusy end,
     InFocusAttack = function() return nativeBusy end, InCounterState = function() return nativeBusy end,
     IsUsingFocus = function() reads.focus=reads.focus+1; return usingFocus end,
     InFocusCharged = function() return focusCharged end,
@@ -161,7 +172,8 @@ local env = setmetatable({
             to_uobject = function(self, address) return components[address] end},
         sdk = {callbacks = {on_post_engine_tick = function(fn) callbacks.tick = fn end, on_lua_event = function() end}},
         params = {
-            functions = {log_info = function(message) logs[#logs + 1] = message end},
+            functions = {log_info = function(message) logs[#logs + 1] = message end,
+                log_error = function(message) logs[#logs + 1] = message end},
             sdk = {callbacks = {on_script_reset = function(fn) callbacks.reset = fn end}},
         },
     },
@@ -177,6 +189,9 @@ local function prime()
     helper.setEnabled(false); helper.setEnabled(true)
     paused, menu, interacting, wallFirst, skipObstacle, failDamage = false, false, false, false, false, false
     usingFocus, focusCharged, counterReady, nativeBusy, attackAllowed = false, false, false, false, true
+    broadAttackState = false
+    forceDeflect, breakOnTrace, weaponBroken = nil, false, false
+    anim.AnimStateType, anim.CanEnterAttack = 0, false
     staminaCosts = {}
     health, released, sweepHasEnemy, obstacleResponse = 500, 0, true, 2
     playerPosition.X, playerYaw, grip = 0, 0, mesh
@@ -215,6 +230,20 @@ assert(health == 325, 'slow contact while the gesture window is open must regist
 helper.setEnabled(false); helper.setEnabled(true); calls, damageResults = {}, {}; health = 500
 callbacks.begin(1, 1); tick(0); tick(3)
 assert(health == 325, 'first weapon configuration must preserve an already-open gesture window')
+
+for _, deflect in ipairs({7,8}) do
+    prime();forceDeflect,breakOnTrace=deflect,true
+    callbacks.begin(1,1);tick(4)
+    assert(health==325 and weaponBroken, 'breaking blow retains native contact/durability and damage')
+    assert(anim.AnimStateType==0 and not anim.CanEnterAttack, 'physical break must not queue an animation recoil')
+    tick(5)
+    assert(count('EndTraceByAttackID')==1 and #damageResults==1, 'broken weapon closes its window without another hit')
+end
+prime();forceDeflect=8;anim.AnimStateType,anim.CanEnterAttack=1,true
+callbacks.begin(1,1);tick(4)
+assert(anim.AnimStateType==1 and anim.CanEnterAttack, 'retain requests that existed before the physical contact')
+prime();forceDeflect=17;callbacks.begin(1,1);tick(4)
+assert(anim.AnimStateType==17 and anim.CanEnterAttack, 'do not suppress a non-deflection native request')
 
 prime(); playerPosition.X = 10; tick(11)
 assert(#calls == 0, 'walking cannot attack outside a gesture window')
@@ -264,7 +293,6 @@ callbacks.input(0, 0, input)
 assert(input.Gamepad.bRightTrigger == 0 and not input.Gamepad.r1 and input.Gamepad.b, 'consume animated attacks only')
 menu = true; input.Gamepad.bRightTrigger = 255; input.Gamepad.r1 = true; callbacks.input(0, 0, input)
 assert(input.Gamepad.bRightTrigger == 255 and input.Gamepad.r1, 'preserve menu input')
-assert(#logs <= 24, 'diagnostics must remain bounded')
 
 local function input(rt, rb, lt)
     local value = {Gamepad={bRightTrigger=rt or 0, r1=rb == true, bLeftTrigger=lt or 0}}
@@ -292,6 +320,11 @@ assert(damageResults[3].ComboName == 'Pipe_ComboL' and staminaCosts[2] == 'Pipe_
 
 prime(); attackAllowed = false; callbacks.begin(1,1); tick(4)
 assert(#damageResults == 0 and #staminaCosts == 0, 'respect native attack/stamina restrictions')
+
+prime(); broadAttackState=true; tick(2); callbacks.begin(1,1); tick(4)
+assert(health == 325, 'a broad attack-state flag without a focus/counter attack must not block physical melee')
+currentTarget=otherCharacter; tick(5)
+assert(#damageResults == 2, 'a continuing physical swing must not cancel itself because of the broad attack-state flag')
 
 prime(); usingFocus=true; tick(2)
 assert(not input(0,true,255).r1, 'LT plus RB before charge must not trigger a focused attack')

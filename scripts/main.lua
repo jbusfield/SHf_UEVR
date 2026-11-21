@@ -11,23 +11,20 @@ local interaction = require('libs/interaction')
 local ui = require('libs/ui')
 local remap = require('libs/remap')
 local gestures = require('libs/gestures')
-local gunstock = require('libs/gunstock')
-local scopes = require('libs/scope')
 local ik = require('libs/ik')
 local animation = require('libs/animation')
 local collision = require('libs/collision')
-local laser = require('libs/laser')
 local plugin = require('libs/core/plugin')
 local mouse = require('libs/mouse')
+local grip = require('libs/grip')
+local prompts = require('libs/prompts')
+local mechanisms = require('libs/mechanisms')
+local GRIP_PRIORITY = require('helpers/grip_priority')
+
 
 require("helpers/melee")
--- require("helpers/curveball")
--- local portables = require("helpers/portables")
--- local ranged = require("helpers/ranged")
--- local weapons = require("helpers/weapons")
--- local flashlight = require("helpers/flashlight")
--- local body = require("helpers/body")
--- local alyxWheel = require("helpers/alyx_wheel")
+require("helpers/ik_materials")
+local interactions = require("helpers/interactions")
 
 uevrUtils.setLogLevel(LogLevel.Debug)
 -- reticule.setLogLevel(LogLevel.Debug)
@@ -58,21 +55,19 @@ pawnModule.init()
 remap.init()
 input.init()
 gestures.init()
-gunstock.showConfiguration()
-scopes.setDefaultPitchOffset(90.0)
-ik.init()
 collision.init()
+-- After helpers/interactions has made its mechanisms: loads their profiles and, in developer mode, the Mechanisms Dev Config.
+mechanisms.init()
+
+uevrUtils.set_2D_mode(false)
 
 hands.setAutoCreateHands(false)
 ik.setAutoCreateArms(false)
 
---since weapons are attached to the hand sockets for this game
---only let the hands be affected by gunstock offsets
-attachments.setGunstockOffsetsEnabled(false)
-hands.setGunstockOffsetsEnabled(true)
-ik.setGunstockOffsetsEnabled(true)
-
 uevrUtils.set_roomscale_active(true)
+-- Right-eye Lumen fix. With UEVR Native Stereo Fix on, the right eye's Lumen lighting goes stale after
+-- streamed levels load or unload (missing bounce light indoors, missing soft shadowing outdoors).
+uevrUtils.enableDistanceFieldStereoFix(true)
 
 
 local versionTxt = "v1.0.0"
@@ -85,8 +80,14 @@ local configDefinition = {
 		{
 			{ widgetType = "text", id = "title", label = title },
 			{ widgetType = "indent", width = 20 }, { widgetType = "text", label = "General" }, { widgetType = "begin_rect", },
-                {
-                    widgetType = "combo",
+				{
+					widgetType = "checkbox",
+					id = "toggle_lumen",
+					label = "Toggle Lumen",
+					initialValue = false,
+				},
+				{
+						widgetType = "combo",
                     id = "hands_type",
                     label = "Hands Type",
                     selections = {"Forearms", "IK Arms"},
@@ -138,6 +139,18 @@ local configDefinition = {
                     label = "Physics Based Portables",
                     initialValue = true,
                 },
+                {
+                    widgetType = "checkbox",
+                    id = "physical_item_grab",
+                    label = "Physical Item Grab",
+                    initialValue = true,
+                },
+                {
+                    widgetType = "checkbox",
+                    id = "grip_interact",
+                    label = "Left Grip For Interaction Prompts",
+                    initialValue = true,
+                },
 				{
 					widgetType = "combo",
 					id = "interaction_control_mode",
@@ -153,6 +166,8 @@ local configDefinition = {
 				{ widgetType = "text", wrapped = true, label = "Heavy Attack: Hold Right Trigger while swinging", },
 				{ widgetType = "text", wrapped = true, label = "Focus Attack: Hold Left Trigger to charge Focus, then press RB when charged", },
 				{ widgetType = "text", wrapped = true, label = "Counterattack: Press Right Trigger during the enemy's red counterattack cue", },
+				{ widgetType = "text", wrapped = true, label = "Physical Item Grab: Grip with an empty hand while a food or drink item shows its pickup prompt. Release next to your ear to take it, release elsewhere to drop or throw it", },
+				{ widgetType = "text", wrapped = true, label = "Interact: Left Grip while an interaction prompt shows LB", },
 
 				{ widgetType = "begin_group", id = "interaction_info_vanilla_plus_group", isHidden = true },
 					{ widgetType = "text", wrapped = true, label = "Jump: Right Stick forward", },
@@ -260,6 +275,14 @@ local configDefinition = {
 
 local status = {}
 
+-- local function toggleLumen()
+-- 	uevrUtils.set_cvar_int("r.Lumen.DiffuseIndirect.Allow", 0)
+-- 	delay(50, function()
+-- 		uevrUtils.set_cvar_int("r.Lumen.DiffuseIndirect.Allow", 1)
+-- 	end)
+-- end
+
+
 local function updateBodyVisibility()
     local isVisible = uevrUtils.isInCutscene() or status.isGimmickInput == true
     if pawn.HeadComponent ~= nil then pawn.HeadComponent:SetRenderInMainPass(isVisible) end
@@ -301,7 +324,8 @@ local function getHandComponents()
 end
 
 local function getWeaponMesh()
-    if uevrUtils.isInCutscene() or uevrUtils.isGamePaused() then return nil end
+    if status.isOnLadder or uevrUtils.isInCutscene() or uevrUtils.isGamePaused() then return nil end
+
     local weaponMesh = uevrUtils.getValid(pawn, {"CurrentWeapon", "WeaponMesh"})
     if weaponMesh ~= nil then weaponMesh:SetVisibility(true, false) end
     return weaponMesh
@@ -322,21 +346,109 @@ local defaultAttachOptions = {
 attachments.registerOnGripUpdateCallback(function()
 
     local weaponMesh = getWeaponMesh()
+    -- The fox arm's weapon mesh is empty (helpers/interactions): while the right hand has a grabbed item, the item takes the hand,
+    -- and the fox arm comes back (with its melee) once the item is released. A visible weapon keeps the hand, dropping the item.
+    if interactions.getHeldItemMesh(Handed.Right) ~= nil and interactions.isEmptyWeaponMesh(weaponMesh) then weaponMesh = nil end
 	local rightHandComponent, leftHandComponent = getHandComponents()
-    local rightSocketName = "weapon_r"
+    -- The claw forms drive their own right-arm bone chain, so the hand socket follows the form (see ArmForm).
+    local rightSocketName = status.armForm and status.armForm.rightSocket or "weapon_r"
     --print(weaponMesh, rightHandComponent, rightSocketName)
-    return rightHandComponent and weaponMesh, rightHandComponent, rightSocketName, nil, nil, nil, defaultAttachOptions --, controllers.getController(Handed.Right)
+    -- Held items (helpers/interactions) are attached by libs/grabbable's own grip callback, below this one, on these hand meshes
+    -- and sockets; a weapon drawn into a hand holding one takes the hand, and the item is dropped. The left hand only holds items.
+    return rightHandComponent and weaponMesh, rightHandComponent, rightSocketName, nil, leftHandComponent, "weapon_l", defaultAttachOptions --, controllers.getController(Handed.Right)
 
 end)
 
+------------------- Step-up suppression at walls -------------------
+-- Pushing into an obstacle makes the engine try its automatic step-up on every frame. Each
+-- failed try leaves the capsule up to a few units below its standing height and the next
+-- stopped frame lifts it back, so the VR camera, which rides the capsule, bobs. Measured in
+-- game on 2026-11-16: the bob also happens with the mod's input handling off, and it stopped
+-- with MaxStepHeight at 0. So while the stick is pushed but the pawn is not moving, step-up is
+-- off, with one try every STEP_RETRY_INTERVAL seconds so a stair met from a standstill still climbs.
+-- Set to false to turn this fix off.
+local suppressStepUpAtWalls = true
+local BLOCKED_SPEED = 50        -- below this while pushing, step-up turns off
+local FREE_SPEED = 100          -- above this, step-up turns back on
+local STEP_RETRY_INTERVAL = 0.5 -- seconds between single-frame step-up tries while blocked
+local MOVE_WALKING = 1
+
+local function restoreStepUp()
+	local stepUp = status.stepUp
+	status.stepUp = nil
+	if stepUp == nil or not stepUp.suppressed then return end
+	local cmc = uevrUtils.getValid(stepUp.cmc)
+	if cmc ~= nil then cmc.MaxStepHeight = stepUp.original end
+end
+
+uevr.sdk.callbacks.on_pre_engine_tick(function(engine, delta)
+	local cmc = uevrUtils.getValid(pawn, {"CharacterMovement"})
+
+	local stepUp = status.stepUp
+	if stepUp ~= nil and (cmc == nil or stepUp.address ~= cmc:get_address()) then
+		restoreStepUp()
+		stepUp = nil
+	end
+	if cmc == nil or not suppressStepUpAtWalls then
+		restoreStepUp()
+		return
+	end
+	if stepUp == nil then
+		-- A script reset while suppressed leaves 0 behind, so fall back to the class default
+		local original = cmc.MaxStepHeight
+		if original == nil or original <= 0 then
+			local cdo = cmc:get_class():get_class_default_object()
+			local default = cdo ~= nil and cdo.MaxStepHeight or nil
+			if default == nil or default <= 0 then return end
+			original = default
+			cmc.MaxStepHeight = default
+		end
+		stepUp = {cmc = cmc, address = cmc:get_address(), original = original, suppressed = false, blockedTime = 0}
+		status.stepUp = stepUp
+	end
+
+	local accel = cmc:GetCurrentAcceleration()
+	local velocity = cmc.Velocity
+	local pushing = accel ~= nil and velocity ~= nil and cmc.MovementMode == MOVE_WALKING and accel.X * accel.X + accel.Y * accel.Y > 1
+	local speedSq = pushing and velocity.X * velocity.X + velocity.Y * velocity.Y or 0
+	local limit = stepUp.suppressed and FREE_SPEED or BLOCKED_SPEED
+	local suppress = pushing and speedSq < limit * limit
+	if suppress then
+		stepUp.blockedTime = stepUp.blockedTime + (delta or 0)
+		if stepUp.blockedTime >= STEP_RETRY_INTERVAL then
+			stepUp.blockedTime = 0
+			suppress = false
+		end
+	else
+		stepUp.blockedTime = 0
+	end
+	if suppress ~= stepUp.suppressed then
+		stepUp.suppressed = suppress
+		cmc.MaxStepHeight = suppress and 0 or stepUp.original
+	end
+end)
+------------------- End step-up suppression at walls -------------------
+
 local function cleanup()
+    restoreStepUp()
     status = {}
 end
+
+-- Manual saves are slots 1..GameSlotCount; autosaves start at 100. Cap at 99 to avoid overlap.
+local function ensureSaveSlotLimit()
+	local save = uevrUtils.find_first_of("Class /Script/GameNoce.NoceSaveSubsystem", false)
+	if save ~= nil then
+		plugin.setProperty(save, "CacheStorageSetting.GameSlotCount", 99)
+	end
+end
+ensureSaveSlotLimit()
 
 on_level_change = function(level, levelName)
 	print("on_level_change ", level, levelName)
     cleanup()
     regenerateHands(configui.getValue("hands_type") or 1)
+	ensureSaveSlotLimit()
+	--toggleLumen()
 end
 
 -- Accept an inventory ID so each gesture can request its own consumable.
@@ -374,9 +486,57 @@ local function consumeItem(itemID)
 	end
 end
 
+------------------- Soul Siphon prompt (A → RB) -------------------
+-- The claw Attract Soul hint shows Interact (A). Show RB instead, and make physical RB press A
+-- while the hint is up or the siphon is in progress (melee otherwise eats RB).
+-- Always pass the claw hint's button to prompts so it can restore when Soul Siphon is not active;
+-- only replace while HaveAttrackSoulTarget / siphon state (IsVisible alone stays true too often).
+local SOUL_SIPHON_A_ICON = "PaperSprite /Game/UI/Base/Input/Platform/_XB1/UT_InputGuide_XB1_0.UT_InputGuide_XB1_0"
+-- LightAttack's console icon (right bumper). TransformRB's icon is R3 (XB1_29), not RB.
+local SOUL_SIPHON_RB_ICON = "PaperSprite /Game/UI/Base/Input/Platform/_XB1/UT_InputGuide_XB1_33.UT_InputGuide_XB1_33"
+
+local function isSoulSiphonPromptActive()
+	local p = uevrUtils.getValid(pawn)
+	if p == nil then return false end
+	if p.IsClawAttrackSoulState ~= nil and p:IsClawAttrackSoulState() then return true end
+	local claw = uevrUtils.getValid(p, {"NocePlayerClawTransform"})
+	return claw ~= nil and claw:HaveAttrackSoulTarget()
+end
+
+local function getSoulSiphonPromptImages()
+	local image = uevrUtils.getValid(pawn, {"NocePlayerClawTransform", "ClawAttrackSoulHintWidget", "PromptButtonIcon"})
+	return image ~= nil and {image} or nil
+end
+
+local function getSoulSiphonPromptReplacement(_, original)
+	if not isSoulSiphonPromptActive() then return nil end
+	local aIcon = prompts.loadAsset(SOUL_SIPHON_A_ICON)
+	if aIcon == nil or original == nil or original:get_address() ~= aIcon:get_address() then return nil end
+	return prompts.loadAsset(SOUL_SIPHON_RB_ICON)
+end
+
+local getSoulSiphonPromptIcon, setSoulSiphonPromptIcon = prompts.brushResource()
+prompts.new({
+	interval = 250,
+	getPrompts = getSoulSiphonPromptImages,
+	get = getSoulSiphonPromptIcon,
+	set = setSoulSiphonPromptIcon,
+	getReplacement = getSoulSiphonPromptReplacement,
+	enabled = true,
+})
+------------------- End Soul Siphon prompt -------------------
+
 uevrUtils.registerOnPreInputGetStateCallback(function(retval, user_index, state)
 	local gripMouthLeft, gripEyesLeft, gripHeadLeft, gripEarLeft, triggerMouthLeft, triggerEyesLeft, triggerHeadLeft, triggerEarLeft = gestures.getHeadGestures(state, Handed.Left, true)
-    if gripEarLeft then 
+	if triggerEarLeft then 
+		uevrUtils.pressButton(state, XINPUT_GAMEPAD_BACK)
+		state.Gamepad.bLeftTrigger = 0
+	end
+	-- A press owned by Physical Item Grab (helpers/interactions) is left as it is: grabbable reads the grip after this callback and
+	-- grip.lua hides it from the game, so carrying an item past the ear or mouth must not open the inventory or heal.
+	-- The same goes for a press Grip Interact owns (it is holding A for the game's prompt).
+	local isItemGrabPress = grip.isOwner(Handed.Left, interactions.GRIP_OWNERS[Handed.Left]) or grip.isOwner(Handed.Left, interactions.GRIP_INTERACT_OWNER)
+	if gripEarLeft and not isItemGrabPress then 
         uevrUtils.pressButton(state, XINPUT_GAMEPAD_START)
         uevrUtils.unpressButton(state, XINPUT_GAMEPAD_LEFT_SHOULDER)
      end
@@ -384,7 +544,7 @@ uevrUtils.registerOnPreInputGetStateCallback(function(retval, user_index, state)
 	local gripPressed = uevrUtils.isButtonPressed(state, XINPUT_GAMEPAD_LEFT_SHOULDER)
 	if not gripPressed then
 		status.healGestureLatched = false
-	elseif gripMouthLeft and not status.healGestureLatched then
+	elseif gripMouthLeft and not status.healGestureLatched and not isItemGrabPress then
 		status.healGestureLatched = true
 		-- Execute UObject calls on the game thread, outside the XInput callback.
 		status.consumeItemRequested = "Capsule"
@@ -393,7 +553,46 @@ uevrUtils.registerOnPreInputGetStateCallback(function(retval, user_index, state)
 		-- Keep the wheel closed until release, including when lowering the hand.
 		uevrUtils.unpressButton(state, XINPUT_GAMEPAD_LEFT_SHOULDER)
 	end
+
+	if not uevrUtils.isButtonPressed(state, XINPUT_GAMEPAD_RIGHT_SHOULDER) then
+		status.holsterGripLatched = false
+	end
+	local isHolstering = gestures.detectGestureWithState(gestures.Gesture.HOLSTER, state, Handed.Right, false)
+	if isHolstering then
+		status.holsterToggleRequested = true
+		-- The right grip is the game's light attack (RB): keep this press from the game until release, or drawing a weapon
+		-- with it still held triggers a vanilla attack. Hidden in the post-input callback so the mod's own grip readers see it.
+		status.holsterGripLatched = true
+	end
+
+	-- Right grip at the right ear: DPAD right, with the grip itself kept from the game (as the left ear does). Not for a press
+	-- Physical Item Grab owns: an item carried to that ear is being taken.
+	local _, _, _, gripEarRight = gestures.getHeadGestures(state, Handed.Right, true)
+	if gripEarRight and not grip.isOwner(Handed.Right, interactions.GRIP_OWNERS[Handed.Right]) then
+		uevrUtils.pressButton(state, XINPUT_GAMEPAD_DPAD_RIGHT)
+		uevrUtils.unpressButton(state, XINPUT_GAMEPAD_RIGHT_SHOULDER)
+		uevrUtils.triggerHapticVibration(uevrUtils.getHandedness(), 0, 0.05, 1000, 0.3)
+	elseif isSoulSiphonPromptActive() and uevrUtils.isButtonPressed(state, XINPUT_GAMEPAD_RIGHT_SHOULDER) then
+		uevrUtils.pressButton(state, XINPUT_GAMEPAD_A)
+		uevrUtils.unpressButton(state, XINPUT_GAMEPAD_RIGHT_SHOULDER)
+	end
+
 end, 10)
+
+uevrUtils.registerOnPostInputGetStateCallback(function(retval, user_index, state)
+	if status.holsterGripLatched then
+		uevrUtils.unpressButton(state, XINPUT_GAMEPAD_RIGHT_SHOULDER)
+	end
+end)
+
+-- Grip arbitration (libs/grip): a left grip that starts at the ear (inventory) or at the mouth (heal), or a right grip that starts
+-- at the ear (DPAD right), belongs to that gesture, so Physical Item Grab doesn't grab the item the prompt is on; an item already
+-- in the hand keeps the grip (see helpers/grip_priority). The game still sees these presses as before.
+grip.registerClaim("head_gesture", function(hand, state)
+	local gripMouth, _, _, gripEar = gestures.getHeadGestures(state, hand, true)
+	if gripEar or (hand == Handed.Left and gripMouth) then return GRIP_PRIORITY.HEAD_GESTURE end
+	return nil
+end, {hide = grip.Hide.None})
 
 -- ENoceInteractType
 local InteractType = {
@@ -482,6 +681,24 @@ local function isNarrowMove(pawn)
 	return false, nil
 end
 
+-- The claw pawn's body mesh has separate right-arm bone chains for the fox arm ("_small_r") and the
+-- large claw ("_large_r"). Each form has its own IK profile, Forearms profile and right-hand socket.
+-- There is no large-claw Forearms profile yet, so that form uses "Fox Arm".
+local ArmForm = {
+	Default   = { pawnProfile = "Default", ikProfile = "Default",       handsProfile = "Main",    rightSocket = "weapon_r",       inputProfile = "Default" },
+	Claw      = { pawnProfile = "Fox Arm", ikProfile = "Fox Arm",       handsProfile = "Fox Arm", rightSocket = "weapon_small_r", inputProfile = "Fox" },
+	ClawLarge = { pawnProfile = "Fox Arm Large", ikProfile = "Fox Arm Large", handsProfile = "Fox Arm Large", rightSocket = "weapon_large_r", inputProfile = "Fox" },
+}
+
+-- returns an ArmForm entry, or nil while there is no valid pawn
+local function getArmForm(pawn)
+	pawn = uevrUtils.getValid(pawn)
+	if pawn == nil then return nil end
+	if pawn.IsClawG ~= nil and pawn:IsClawG() then return ArmForm.ClawLarge end
+	if pawn.IsClaw ~= nil and pawn:IsClaw() then return ArmForm.Claw end
+	return ArmForm.Default
+end
+
 -- true  = flee also requires CameraMode.FaceTarget (clean exit; ForceBattling sticks otherwise)
 -- false = flee is ForceBattling alone (no camera tag call)
 local checkCameraFaceTarget = true
@@ -492,6 +709,22 @@ uevr.sdk.callbacks.on_pre_engine_tick(function(engine, deltaTime)
 		local itemID = status.consumeItemRequested
 		status.consumeItemRequested = nil
 		consumeItem(itemID)
+	end
+	if status.holsterToggleRequested then
+		status.holsterToggleRequested = nil
+		-- Holster gesture toggles: put away the weapon in hand (or being switched to), otherwise draw the last used one.
+		local inv = uevrUtils.getValid(uevrUtils.get_player_controller(), {"PlayerState", "InventoryComponent"})
+		if inv ~= nil then
+			if inv:GetEquippedOrTargetWeaponIndex() >= 0 then
+				inv:UnEquipCurrentWeapon()
+				uevrUtils.triggerHapticVibration(uevrUtils.getHandedness(), 0, 0.05, 1000, 0.3)
+			elseif inv:HasAnyWeapon() then
+				inv:TryEquipLastUsedWeapon()
+				uevrUtils.triggerHapticVibration(uevrUtils.getHandedness(), 0, 0.05, 1000, 0.3)
+				-- Attach the drawn weapon now instead of leaving it off the hand until the grip-update timer.
+				attachments.forceGripUpdate()
+			end
+		end
 	end
 	-- PlaySequenceState / CS_Seamless (post-fence flee, etc.)
 	local inEvent = pawn ~= nil and pawn.GetIsInEvent ~= nil and pawn:GetIsInEvent()
@@ -540,12 +773,22 @@ end)
 
 setInterval(1000, function()
 	local isNarrow, face = isNarrowMove(pawn)
-	if status.isNarrow ~= isNarrow or status.narrowFace ~= face then
-		status.isNarrow = isNarrow
-		status.narrowFace = face
-		input.setCurrentProfileByLabel(isNarrow and (face == "R" and "NarrowMoveR" or "NarrowMoveL") or "Default")
+	local armForm = getArmForm(pawn)
+	-- Narrow movement keeps its sideways profiles; otherwise the arm form picks the profile (both claws use "Fox").
+	-- Without a valid pawn the current profile stays. Only switch on change: each switch resets the height source.
+	local inputProfile = status.isOnLadder and "Ladder" or isNarrow and (face == "R" and "NarrowMoveR" or "NarrowMoveL") or (armForm and armForm.inputProfile)
+	if inputProfile ~= nil and status.inputProfile ~= inputProfile then
+		status.inputProfile = inputProfile
+		input.setCurrentProfileByLabel(inputProfile, {transitionTime = 0.3})
 	end
-
+	if armForm ~= nil and status.armForm ~= armForm then
+		status.armForm = armForm
+		ik.setCurrentProfileByLabel(armForm.ikProfile)
+		hands.setAutoCreateProfile(armForm.handsProfile, "Shared")
+		pawnModule.setCurrentProfileByLabel(armForm.pawnProfile)
+		-- Arms keep the bones of the profile they were created with, so rebuild them for the new form.
+		regenerateHands(configui.getValue("hands_type") or 1)
+	end
 
     -- local interacting, interactionType = getInteraction(pawn)
     -- if status.interactionType ~= interactionType then
@@ -555,7 +798,8 @@ setInterval(1000, function()
 end)
 
 
--------------- Fix for interaction Icons ------------------------------
+local unlimitedAwaken = false
+
 uevr.sdk.callbacks.on_pre_engine_tick(function()
     -- Invincibility through the game's own component.
 	local invincible = uevrUtils.getValid(pawn, {"NoceInvincible"})
@@ -564,19 +808,57 @@ uevr.sdk.callbacks.on_pre_engine_tick(function()
 		invincible:StartInvincible(token)
 	end
 
+	-- Keep Kudzu Seal / Awaken (ClawTransform) full so the mode never runs out.
+	if unlimitedAwaken then
+		local claw = uevrUtils.getValid(pawn, {"NocePlayerClawTransform"})
+		if claw ~= nil and not claw:IsClawTransformFull() then
+			claw:FillClawTransformToFull()
+		end
+	end
 end)
+
+-- A sprint turns the body toward the stick, but the yaw lock below stops the body turning, so
+-- stick-back mid-sprint retries the turn-around forever. While the sprint is still in a moving
+-- anim state the stick is held neutral; once it winds down (JogEnd) stick-back is a plain backpedal.
+local holdStickForSprintStop = false
 
 --replace input config Player Controller Overrides with this for Pitch Yaw and Roll
 -- "Default", "Fixed", "Pawn", "HMD"
 uevr.sdk.callbacks.on_pre_engine_tick(function()
+    holdStickForSprintStop = false
+    if pawn == nil then return end
     if ui.isInputDisabled() or uevrUtils.isInCutscene() then return end
+
+    if pawn.IsInRunning ~= nil and pawn:IsInRunning() then
+        local anim = uevrUtils.getValid(pawn, {"PlayerAnimInstance"})
+        local stateName = anim ~= nil and anim.ActiveStateName or nil
+        if stateName ~= nil then
+            local name = stateName:to_string():gsub("%z", "")
+            holdStickForSprintStop = name == "JogStart" or name == "Sprint"
+        end
+    end
 
     local pc = uevr.api:get_player_controller(0)
     local head = controllers.getControllerRotation(2)
     if pc == nil or head == nil then return end
 
+	local interacting, interactType = getInteraction(pawn)
+	status.isOnLadder = interacting and interactType == InteractType.Ladder
+	-- On a ladder the weapon is back in the pawn's own hand, which climbs (the Ladder mechanism's Animate Steps), so it is hidden
+	-- on every tick there. getWeaponMesh shows it again once the player is off the ladder.
+	if status.wasOnLadder ~= status.isOnLadder then
+		local weaponMesh = uevrUtils.getValid(pawn, {"CurrentWeapon", "WeaponMesh"})
+		if weaponMesh ~= nil then weaponMesh:SetHiddenInGame(status.isOnLadder, false) end
+		collision.disableCollisionByLabel("Left Ladder", not status.isOnLadder)
+		collision.disableCollisionByLabel("Right Ladder", not status.isOnLadder)
+		status.wasOnLadder = status.isOnLadder
+	end
+
     local rotation = pc:GetControlRotation()
-    rotation.Pitch = head.Pitch
+    -- On a ladder the game's camera hangs on an arm behind the player (measured 2026-11-17: 140 cm behind and 44 cm below at
+    -- +20 pitch; the game clamps the pitch to +20/-33 there) and swings around the head with the control pitch, so the view rose
+    -- a step when the head tilted down and sank when it tilted up. There the pitch is held level.
+    rotation.Pitch = status.isOnLadder and 0 or head.Pitch
     rotation.Yaw = pawn:K2_GetActorRotation().Yaw
     pc:SetControlRotation(rotation)
 end)
@@ -586,12 +868,19 @@ uevrUtils.registerOnPostInputGetStateCallback(function(retval, user_index, state
 
     -- After remapping, so stick-down still produces B.
     state.Gamepad.sThumbRY = 0
+    -- On a ladder the game's look input turns the pawn (it follows the control yaw), so the game gets no right-stick X there.
+    if status.isOnLadder then state.Gamepad.sThumbRX = 0 end
 
-    -- if state.Gamepad.sThumbLY < -1000 then
-    --     pawn.NocePlayerController:DoSimulateInputAction(3, false)
-    -- end
+    if state.Gamepad.sThumbLY < -8000 then
+        -- Stick back: drop L3 so a sprint (and its spin toward the stick) cannot start.
+        uevrUtils.unpressButton(state, XINPUT_GAMEPAD_LEFT_THUMB)
+        -- Stick pulled back during a sprint: deliver neutral so the game ends the sprint first.
+        if holdStickForSprintStop then
+            state.Gamepad.sThumbLX = 0
+            state.Gamepad.sThumbLY = 0
+        end
+    end
 end)
---------------- End of Fix for interaction Icons ------------------------------
 
 configui.onUpdate("hands_type", function(value)
     regenerateHands(value)
@@ -599,6 +888,14 @@ end)
 
 configui.onCreateOrUpdate("use_controller_mouse", function(value)
 	mouse.setOverrideEnable(value)
+end)
+
+configui.onCreateOrUpdate("physical_item_grab", function(value)
+	interactions.setItemGrabEnabled(value)
+end)
+
+configui.onCreateOrUpdate("grip_interact", function(value)
+	interactions.setGripInteractEnabled(value)
 end)
 
 ui.registerWidgetChangeCallback("WBP_SavePoint_C", function(active, widget)
@@ -610,6 +907,102 @@ ui.registerWidgetChangeCallback("WBP_GimmickInput_C", function(active, widget)
 	status.isGimmickInput = active
 end)
 
+-- In LS_SC0101_L2_M, shots whose camera has a 37.5 degree FOV play in 2D screen mode.
+-- Checked only when the view target changes. LevelSequenceActor is a native class, so the
+-- class lookup always succeeds and is cached.
+local function isTwoDSequenceLoaded()
+	for _, actor in ipairs(uevrUtils.find_all_of("Class /Script/LevelSequence.LevelSequenceActor") or {}) do
+		local player = actor.SequencePlayer
+		local name = player ~= nil and player:GetSequenceName() or nil
+		if name ~= nil and name:gsub("%z", "") == "LS_SC0101_L2_M" then return true end
+	end
+	return false
+end
+
+local function updateCutscene2D(target)
+	local camera = target ~= nil and target.CameraComponent or nil
+	local use2D = camera ~= nil and math.abs(camera.FieldOfView - 37.5) < 0.1 and isTwoDSequenceLoaded()
+	if use2D == (status.isCutscene2D == true) then return end
+	status.isCutscene2D = use2D
+	uevrUtils.set_2D_mode(use2D)
+end
+
+-- A level sequence with a fade track restores the camera fade it saved when it started,
+-- on the frame it stops. If ui.lua's WBP_SimpleFade camera fade was black at that moment,
+-- the cutscene ends on a held black fade. The view target returns to the pawn on that same
+-- frame, so clear the fade then, unless ui.lua currently wants one.
+-- Read the camera manager's ViewTarget.Target, not pc:GetViewTarget(): during the blend back
+-- to the pawn, GetViewTarget() already returns the pawn (the pending target) seconds before
+-- the sequence stops, while ViewTarget.Target switches on the frame it stops.
+uevr.sdk.callbacks.on_pre_engine_tick(function()
+	local pc = uevr.api:get_player_controller(0)
+	local camMan = pc ~= nil and pc.PlayerCameraManager or nil
+	if camMan == nil then return end
+	local target = camMan.ViewTarget.Target
+	local address = target ~= nil and target:get_address() or nil
+	if address == status.lastViewTargetAddress then return end
+	status.lastViewTargetAddress = address
+	updateCutscene2D(target)
+	if target ~= nil and pawn ~= nil and address == pawn:get_address() and not ui.isFadeCameraEnabled() then
+		uevrUtils.stopFadeCamera()
+	end
+end)
+
+-- Journal text is on page widgets. The game stacks a new one on each entry switch and
+-- then hides them, expecting the scene-captured book to show. That capture is blank in VR.
+-- Keep only the current page; fast switching otherwise leaves every previous page up.
+-- The game hides a page only when it creates it, and its page functions are Blueprint
+-- functions that cannot be hooked, so the tick below only checks and fixes when needed.
+local function showCurrentJournalPage(overlay, keep)
+	if overlay == nil or keep == nil then return false end
+	if overlay.RenderOpacity >= 1 and keep:GetVisibility() == 4 then return false end
+	overlay:SetRenderOpacity(1)
+	local keepAddress = keep ~= nil and keep:get_address() or nil
+	for i = 0, overlay:GetChildrenCount() - 1 do
+		local child = overlay:GetChildAt(i)
+		if child ~= nil then
+			child:SetVisibility(keepAddress ~= nil and child:get_address() == keepAddress and 4 or 1)
+		end
+	end
+	return true
+end
+
+-- The page overlays are laid out for drawing onto the 3D book, not side by side: their slot
+-- paddings put them closer together than one page width, so the right page covers the left
+-- page's edge and split illustrations break at the seam. Move the right page to meet the left.
+local function alignJournalPages(book)
+	local left, right = book.Left, book.Right
+	if left == nil or right == nil or left.Slot == nil or right.Slot == nil then return end
+	local offset = right:GetDesiredSize().X - (right.Slot.Padding.Left - left.Slot.Padding.Left)
+	if math.abs(right.RenderTransform.Translation.X - offset) > 0.5 then
+		right:SetRenderTranslation(uevrUtils.vector_2(offset, 0))
+	end
+end
+
+-- The notebook is a child of the pause menu, not a viewport widget, so ui never reports it.
+-- Track the pause menu instead and reach the notebook through it.
+ui.registerWidgetChangeCallback("WBP_Pause_C", function(active, widget)
+	status.pauseMenu = active and widget or nil
+end)
+
+uevr.sdk.callbacks.on_post_engine_tick(function()
+	local pauseMenu = uevrUtils.getValid(status.pauseMenu)
+	if pauseMenu == nil then return end
+	local notebook = uevrUtils.getValid(pauseMenu, {"NotebookWidget"})
+	local current = uevrUtils.getValid(pauseMenu, {"CurrentWidget"})
+	if notebook == nil or current == nil or current:get_address() ~= notebook:get_address() then return end
+	local book = uevrUtils.getValid(notebook, {"Book"})
+	if book == nil then return end
+	local leftChanged = showCurrentJournalPage(book.Left, book.LeftWidget)
+	local rightChanged = showCurrentJournalPage(book.Right, book.RightWidget)
+	if leftChanged or rightChanged then alignJournalPages(book) end
+end)
+
+configui.onUpdate("toggle_lumen", function(value)
+    uevrUtils.set_cvar_int("r.Lumen.DiffuseIndirect.Allow", value and 0 or 1)
+end)
+
+
 configui.create(configDefinition)
 
 local isPaused = false
@@ -618,5 +1011,10 @@ register_key_bind("F2", function()
     uevrUtils.pauseGame(isPaused)
 end)
 
--- Temporary, bounded read-only capture for snap-turn timing investigation.
-dofile([[C:\Users\john\Documents\Projects\SHf_UEVR\.tools\snap-turn\timing-probe.lua]])
+register_key_bind("F3", function()
+    unlimitedAwaken = true
+    delay(1000, function()
+        unlimitedAwaken = false
+    end)
+end)
+

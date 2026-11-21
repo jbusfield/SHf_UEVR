@@ -188,7 +188,7 @@ end
 -- brightness in bright scenes, where widgets otherwise look washed out against the scene.
 -- ev100 is the game's current auto-exposure (nil assumes daylight), stops is a user brightness offset (each step doubles)
 function M.setWidgetComponentExposure(component, ev100, stops)
-	if uevrUtils.getValid(component) == nil then return end
+	if uevrUtils.getValid(component) == nil or component.SetTintColorAndOpacity == nil then return end
 	local boost = 2 ^ ((ev100 or 11) * 1.1 + (stops or 0))
 	component:SetTintColorAndOpacity(uevrUtils.color_from_rgba(boost, boost, boost, 1.0, true))
 end
@@ -706,7 +706,7 @@ end
 function M.detachAll()
 	for _, inst in pairs(createdByKey) do
 		local c = uevrUtils.getValid(inst.component)
-		if c ~= nil then
+		if c ~= nil and c.DetachFromParent ~= nil then
 			c:DetachFromParent(true, false)
 			inst:setVisibility(false)
 		end
