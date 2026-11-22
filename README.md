@@ -3,6 +3,7 @@ A VR first person mod for UEVR when playing Silent Hill f
 
 ## Features
 - Full 1st person 6DOF Motion controls
+- Real Melee
 - Full visible body
 - Optional IK arm or hands
 - Cutscene fixes
