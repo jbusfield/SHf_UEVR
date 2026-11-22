@@ -23,7 +23,8 @@ local controls = {rbDown = false, rtDown = false, heavyHeld = false}
 local enabled = true
 local library
 local characterClass
-local HIT_OUTPUTS = {'OutHits.Component', 'OutHits.ImpactPoint', 'OutHits.Time'}
+local bodyPartData = {} -- enemy body-part data, per data asset address (see resolveBodyPart)
+local HIT_OUTPUTS = {'OutHits.Component', 'OutHits.ImpactPoint', 'OutHits.Time', 'OutHits.BoneName'}
 local WEAPON_PATH, MESH_PATH, TRACE_PATH = {'CurrentWeapon'}, {'WeaponMesh'}, {'NoceAttackTrace'}
 local ANIM_PATH = {'PlayerAnimInstance'}
 
@@ -54,7 +55,7 @@ end
 
 local function resetLevel()
     reset()
-    configurationCache, noOwnRecords = {}, {}
+    configurationCache, noOwnRecords, bodyPartData = {}, {}, {}
     library, characterClass = nil, nil
 end
 
@@ -185,7 +186,98 @@ local function hitComponent(reference)
     end
 end
 
-local function damageContacts(player, weapon, previous, pose, damage)
+-- The bone of the first contact from index `from` on that hit the target. The sweep often reaches the capsule (no bone)
+-- before the mesh.
+local function contactBone(ordered, from, address)
+    for i = from, #ordered do
+        local hit = ordered[i].hit
+        if hit.BoneName ~= nil and hit.BoneName ~= 'None' then
+            local component = hitComponent(hit.Component)
+            local owner = component and uevrUtils.getValid(component:GetOwner())
+            if owner ~= nil and owner:get_address() == address then return hit.BoneName end
+        end
+    end
+end
+
+-- An enemy's body-part data asset, read once. Bone keys are lowercased: the game compares FNames, which ignore case
+-- (the map's "Head" is the mesh's "head").
+local function assetData(asset, read)
+    local address = asset:get_address()
+    if bodyPartData[address] == nil then bodyPartData[address] = read(asset) end
+    return bodyPartData[address]
+end
+
+local function readBoneMap(mapping)
+    local bones = {}
+    for bone, entry in pairs(plugin.getProperty(mapping, 'BoneNameBodyPartMap') or {}) do
+        bones[string.lower(bone)] = entry.BodyPart
+    end
+    return bones
+end
+
+-- The body part and group a contact hits, chosen as the game's hit processing chooses them: the hit bone, or its nearest
+-- listed parent, gives the part; the highest-Priority active group listing that part wins. A group listing only part 0
+-- takes any part, and a CheckAngle group needs the hit angle inside its range. Returns part, group name, group record.
+local function resolveBodyPart(target, bone, angle)
+    local component = uevrUtils.getValid(target, {'BodyPartGroupComponent'})
+    local groupAsset = component and uevrUtils.getValid(component.BodyPartGroup)
+    if groupAsset == nil then return 0 end
+    local part = 0
+    local mapping, mesh = uevrUtils.getValid(component.BoneNameToBodyPartMapping), uevrUtils.getValid(target.Mesh)
+    if mapping ~= nil then
+        local bones = assetData(mapping, readBoneMap)
+        while bone ~= nil and bone ~= 'None' do
+            local found = bones[string.lower(bone)]
+            if found ~= nil then part = found; break end
+            bone = mesh and mesh:GetParentBone(uevrUtils.fname_from_string(bone)):to_string()
+        end
+    end
+    local records = assetData(groupAsset, function() return {} end)
+    local bestName, best = nil, nil
+    for _, name in ipairs(plugin.getProperty(component, 'ActiveBodyPartGroups') or {}) do
+        if records[name] == nil then records[name] = plugin.getProperty(groupAsset, 'BodyPartGroupMap[' .. name .. ']') or false end
+        local group = records[name]
+        if group then
+            local parts = group.BodyParts or {}
+            local matches = #parts == 1 and parts[1] == 0
+            for _, listed in ipairs(parts) do matches = matches or listed == part end
+            if matches and (best == nil or group.Priority > best.Priority) and (not group.CheckAngle
+                or (angle >= group.AngleSetting.MinAngle and angle <= group.AngleSetting.MaxAngle)) then
+                bestName, best = name, group
+            end
+        end
+    end
+    return part, bestName, best
+end
+resolveBodyPart = uevrUtils.profiler:wrap('MELEE: resolveBodyPart', resolveBodyPart)
+
+-- A factor drawn uniformly from 1 - rate to 1 + rate, the game's damage spread.
+local function spread(rate)
+    return 1 - rate + math.random() * 2 * rate
+end
+
+-- Health and wince damage of one contact, as the game's native hit processing computes them (traced in
+-- SHf-Win64-Shipping.exe 2026-11-22: health at RVA 0x4C6F250, wince at 0x4C6FD50). The cheat manager's ratios are
+-- left out; the shipping game has no cheat manager, so they are 1.
+local function contactDamage(player, target, weapon, attack, group)
+    local combo, values = state.combo, state.values
+    local bodyDamage, bodyWince = 1, 1
+    if group then bodyDamage, bodyWince = group.DamageMultiplier, group.WinceMultiplier end
+    local health = (values.Attack * bodyDamage * attack.AttackMultiplier
+        + (values.ExtraAttack + player:GetExtraAttack()) * attack.ExtraAttackMultiplier)
+        * player:GetAttack() * spread(combo.AttackFloatRate) * player:GetFocusAttackRatioHealth()
+    if target.IsBreakDown ~= nil and target:IsBreakDown() then health = health * player:GetEnemyBreakDownAttackRatio() end
+    -- This contact broke the weapon: the native trace earlier in the tick charged its durability to 0.
+    if weapon:GetCanBeBroken() and weapon:GetDurability() <= 0 and player:IsWeaponBreakForceKnockBack() then
+        health = health * player:GetWeaponBreakAttackRatio()
+    end
+    local wince = (values.Wince * bodyWince * attack.WinceMultiplier + values.ExtraWince)
+        * spread(combo.WinceFloatRate) * player:GetWince() * player:GetFocusAttackRatioWince()
+    return health, wince
+end
+contactDamage = uevrUtils.profiler:wrap('MELEE: contactDamage', contactDamage)
+
+local function damageContacts(player, weapon, previous, pose, attack)
     local ignored = {player, weapon}
     -- VR hands live on a separate actor, unlike the game's own character mesh.
     local parent = uevrUtils.getValid(weapon.WeaponMesh:GetAttachParent())
@@ -207,7 +299,7 @@ local function damageContacts(player, weapon, previous, pose, damage)
             ordered[#ordered + 1] = {index = index, hit = hit}
         end
         table.sort(ordered, function(a, b) return (a.hit.Time or 0) < (b.hit.Time or 0) end)
-        for _, contact in ipairs(ordered) do
+        for position, contact in ipairs(ordered) do
             local component = hitComponent(contact.hit.Component)
             local target = component and uevrUtils.getValid(component:GetOwner())
             if component ~= nil and target ~= nil and target:get_address() ~= player:get_address()
@@ -229,16 +321,20 @@ local function damageContacts(player, weapon, previous, pose, damage)
                     local length = math.sqrt(dx * dx + dy * dy + dz * dz)
                     local point = contact.hit.ImpactPoint
                     local angle = library:CalculateDamageDirectionAngle(target, uevrUtils.vector(point))
+                    local part, groupName, group = resolveBodyPart(target, contactBone(ordered, position, address), angle)
+                    local health, wince = contactDamage(player, target, weapon, attack, group)
                     plugin.executeFunctionWithOutputs(target, 'OnDamaged', {}, {
                         Instigator = player,
                         HitResult = plugin.handleParam(result.handle, nil, contact.index),
                         ComboName = state.comboString,
                         Angle = angle,
+                        BodyPart = part,
+                        BodyPartGroup = groupName or 'None',
                         CloseHitLocation = point,
                         AttackDirection = length > 0 and {X = dx / length, Y = dy / length, Z = dz / length}
                             or {X = 0, Y = 0, Z = 0},
-                        HealthDamage = damage.health,
-                        WinceDamage = damage.wince,
+                        HealthDamage = health,
+                        WinceDamage = wince,
                         WinceType = state.combo.WinceType,
                         IsForceWince = state.combo.IsForceWince,
                         IsInvertWinceDirection = state.combo.IsInvertWinceDirection,
@@ -403,6 +499,11 @@ local function update(delta)
             return
         end
         state.combo, state.comboName, state.comboString = selected.combo, selected.name, selected.text
+        -- The weapon's own record replaces the combo's attack and wince values, as in the native damage code. Bridge:
+        -- native UEVR Lua returns none of this function's out parameters (nil, nil, nil when probed 2026-11-22).
+        state.values = selected.combo
+        local override = plugin.executeFunction(weapon, 'GetOverrideComboInfo', selected.text, false, {})
+        if override ~= nil and override.OutFound then state.values = override.OutComboInfo end
         local stamina = uevrUtils.getValid(player, {'NocePlayerStamina'})
         if stamina ~= nil then stamina:CostStamina(selected.stamina) end
         -- Native attack ID state prevents repeated damage while a swing stays in contact.
@@ -414,11 +515,6 @@ local function update(delta)
     end
     local attack = plugin.executeFunction(weapon, 'GetAttackInfo', weapon:GetDurability(), 0, 0, 0)
     if attack == nil then return end
-    local damage = {
-        health = state.combo.Attack * player:GetAttack() * attack.AttackMultiplier
-            + state.combo.ExtraAttack * player:GetExtraAttack() * attack.ExtraAttackMultiplier,
-        wince = state.combo.Wince * attack.WinceMultiplier,
-    }
     -- Native trace retains durability, environment contact and deflection handling.
     -- OnDeflect also queues an animated recoil when a weapon breaks. Physical melee
     -- has no animation attack state to finish that recoil, so retain the pre-trace request.
@@ -435,9 +531,9 @@ local function update(delta)
             anim.AnimStateType, anim.CanEnterAttack = previousType, previousAttack
         end
     end
-    -- OnHit's damage listener exists only during the vanilla attack state. Forward real
-    -- physical contacts to the same character damage entry point without entering that state.
-    damageContacts(player, weapon, previous, pose, damage)
+    -- The game applies damage only to hits of its own attack notifies' traces. Forward real physical contacts to the
+    -- same character damage entry point, with the damage its native hit processing would compute (contactDamage).
+    damageContacts(player, weapon, previous, pose, attack)
     clearHitStop(player)
 end
 update = uevrUtils.profiler:wrap('MELEE: update', update)

@@ -66,7 +66,7 @@ Usage
     montage.onUpdate(stateKey, func) - registers a callback invoked when a montage state value changes.
         Callback receives (value, priority). value may be true, false, or nil (default/cleared).
         Valid stateKey values: hands, leftArm, rightArm, pawnBody, pawnArms, pawnArmBones,
-        motionSicknessCompensation, inputEnabled, leftAccessory, rightAccessory
+        motionSicknessCompensation, inputEnabled, rootMotion, leftAccessory, rightAccessory
         example:
             montage.onUpdate("pawnArmBones", function(value)
                 print("pawnArmBones changed:", value)
@@ -109,6 +109,7 @@ local montageState = {
 	pawnArmBones = nil,
 	motionSicknessCompensation = nil,
 	inputEnabled = nil,
+	rootMotion = nil,
 	leftAccessory = nil,
 	rightAccessory = nil,
 }
@@ -183,6 +184,7 @@ local stateConfig = {
 	{stateKey = "pawnArmBones", valueKey = "pawnArmBonesWhenActive", kind = "tri"},
 	{stateKey = "motionSicknessCompensation", valueKey = "motionSicknessCompensationWhenActive", kind = "tri"},
 	{stateKey = "inputEnabled", valueKey = "inputWhenActive", kind = "tri"},
+	{stateKey = "rootMotion", valueKey = "rootMotionWhenActive", kind = "tri"},
 	{stateKey = "leftAccessory", valueKey = "leftAccessoryWhenActive", kind = "accessory"},
 	{stateKey = "rightAccessory", valueKey = "rightAccessoryWhenActive", kind = "accessory"},
 }
@@ -351,6 +353,22 @@ local developerWidgets = spliceableInlineArray{
 					widgetType = "input_text",
 					id = "motionSicknessCompensationWhenActivePriority",
 					label = " Motion Sickness Compensation",
+					initialValue = "0",
+					width = 35,
+				},
+				{
+					widgetType = "combo",
+					id = "rootMotionWhenActive",
+					label = "",
+					selections = {"No effect", "Enable", "Disable"},
+					initialValue = 1,
+					width = 150,
+				},
+				{ widgetType = "same_line" },
+				{
+					widgetType = "input_text",
+					id = "rootMotionWhenActivePriority",
+					label = " Root Motion",
 					initialValue = "0",
 					width = 35,
 				},
@@ -632,6 +650,34 @@ local function executeMontageChange(...)
 	uevrUtils.executeUEVRCallbacks("on_module_montage_change", table.unpack({...}))
 end
 
+-- Root motion is set here on the montage's own AnimInstance, not by another module. The mode it replaced
+-- is kept per AnimInstance address, since the mesh monitors share handleMontageChanged with the pawn.
+local ROOT_MOTION_IGNORE = 1 -- ERootMotionMode::IgnoreRootMotion
+local ROOT_MOTION_FROM_MONTAGES = 3 -- ERootMotionMode::RootMotionFromMontagesOnly
+local rootMotionOriginal = {}
+
+local function applyRootMotion(animInstance)
+	animInstance = uevrUtils.getValid(animInstance)
+	if animInstance == nil then return end
+	local key = animInstance:get_address()
+	local value = montageState["rootMotion"]
+	if value ~= nil then
+		if rootMotionOriginal[key] == nil then
+			local original = animInstance.RootMotionMode
+			-- A script reset while overridden leaves IgnoreRootMotion behind, so fall back to the class default
+			if original == ROOT_MOTION_IGNORE then
+				local cdo = animInstance:get_class():get_class_default_object()
+				if cdo ~= nil and cdo.RootMotionMode ~= nil then original = cdo.RootMotionMode end
+			end
+			rootMotionOriginal[key] = original
+		end
+		animInstance.RootMotionMode = value and ROOT_MOTION_FROM_MONTAGES or ROOT_MOTION_IGNORE
+	elseif rootMotionOriginal[key] ~= nil then
+		animInstance.RootMotionMode = rootMotionOriginal[key]
+		rootMotionOriginal[key] = nil
+	end
+end
+
 local function handleMontageChanged(montage, montageName, label, animInstance)
 	--print("Montage changed: " .. tostring(montageName))
 	local previous = {}
@@ -658,6 +704,7 @@ local function handleMontageChanged(montage, montageName, label, animInstance)
 		end
 	end
 
+	applyRootMotion(animInstance)
 	executeMontageChange(montage, montageName, label, animInstance)
 end
 
@@ -865,6 +912,7 @@ setInterval(2000, function()
 end)
 
 function M.reset()
+	rootMotionOriginal = {}
 	for descriptor, monitor in pairs(meshMonitors) do
 		monitor.meshObject = nil
 		monitor["currentMontage"] = nil

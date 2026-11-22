@@ -26,7 +26,12 @@ require("helpers/melee")
 require("helpers/ik_materials")
 local interactions = require("helpers/interactions")
 
-uevrUtils.setLogLevel(LogLevel.Debug)
+local tutorial = require('libs/tutorial')
+local t = tutorial.new({ openKey = "F4" })
+t:forceInteractionAtStartup(true)
+t:showOnce()            
+
+--uevrUtils.setLogLevel(LogLevel.Debug)
 -- reticule.setLogLevel(LogLevel.Debug)
 -- input.setLogLevel(LogLevel.Debug)
 -- attachments.setLogLevel(LogLevel.Debug)
@@ -37,12 +42,12 @@ uevrUtils.setLogLevel(LogLevel.Debug)
 -- widgetModule.setLogLevel(LogLevel.Debug)
 -- ik.setLogLevel(LogLevel.Debug)
 
-uevrUtils.setDeveloperMode(true)
-hands.enableConfigurationTool()
-uevrUtils.profiler:toggle(true)
-register_key_bind("F1", function()
-    uevrUtils.profiler:report("alpha")
-end)
+--uevrUtils.setDeveloperMode(true)
+-- hands.enableConfigurationTool()
+-- uevrUtils.profiler:toggle(true)
+-- register_key_bind("F1", function()
+--     uevrUtils.profiler:report("alpha")
+-- end)
 
 ui.init()
 montage.init()
@@ -60,6 +65,7 @@ collision.init()
 mechanisms.init()
 
 uevrUtils.set_2D_mode(false)
+uevrUtils.setUEVRParam("VR_Compatibility_AHUD", "false")
 
 hands.setAutoCreateHands(false)
 ik.setAutoCreateArms(false)
@@ -80,65 +86,25 @@ local configDefinition = {
 		{
 			{ widgetType = "text", id = "title", label = title },
 			{ widgetType = "indent", width = 20 }, { widgetType = "text", label = "General" }, { widgetType = "begin_rect", },
+				-- {
+				-- 	widgetType = "checkbox",
+				-- 	id = "toggle_lumen",
+				-- 	label = "Toggle Lumen",
+				-- 	initialValue = false,
+				-- },
 				{
-					widgetType = "checkbox",
-					id = "toggle_lumen",
-					label = "Toggle Lumen",
-					initialValue = false,
-				},
-				{
-						widgetType = "combo",
+					widgetType = "combo",
                     id = "hands_type",
                     label = "Hands Type",
                     selections = {"Forearms", "IK Arms"},
                     initialValue = 1,
                 },
-				{
-					widgetType = "checkbox",
-					id = "use_controller_mouse",
-					label = "Controller Based Mouse Movement in Menus",
-					initialValue = true
-				},
-                {
-                    widgetType = "checkbox",
-                    id = "weighted_weapons",
-                    label = "Weighted Weapons",
-                    initialValue = true,
-                },
-                {
-                    widgetType = "checkbox",
-                    id = "attachment_lasers",
-                    label = "Gun Lasers",
-                    initialValue = true,
-                },
-                { widgetType = "indent", width = 20 },
-                {
-                    widgetType = "checkbox",
-                    id = "attachment_emmissive_lasers",
-                    label = "Emissive",
-                    initialValue = true,
-                },
-				{ widgetType = "unindent", width = 20 },
-                {
-                    widgetType = "checkbox",
-                    id = "left_arm_block_dodge",
-                    label = "Left Arm Block/Dodge",
-                    initialValue = true,
-                },
-                { widgetType = "indent", width = 20 },
-                {
-                    widgetType = "text",
-                    id = "left_arm_block_dodge_info",
-                    wrapped = true,
-                    label = "Raise your left arm in front of your face with palm out to block or dodge",
-                },
-                { widgetType = "unindent", width = 20 },
-                {
-                    widgetType = "checkbox",
-                    id = "physics_portables",
-                    label = "Physics Based Portables",
-                    initialValue = true,
-                },
+				-- {
+				-- 	widgetType = "checkbox",
+				-- 	id = "use_controller_mouse",
+				-- 	label = "Controller Based Mouse Movement in Menus",
+				-- 	initialValue = true
+				-- },
                 {
                     widgetType = "checkbox",
                     id = "physical_item_grab",
@@ -147,114 +113,29 @@ local configDefinition = {
                 },
                 {
                     widgetType = "checkbox",
-                    id = "grip_interact",
-                    label = "Left Grip For Interaction Prompts",
+                    id = "physical_interactions",
+                    label = "Physical Interactions",
                     initialValue = true,
                 },
-				{
-					widgetType = "combo",
-					id = "interaction_control_mode",
-					label = "Interaction Controls",
-					selections = {"Vanilla", "Vanilla+", "Mixed", "Full Immersion"},
-					initialValue = 1,
-					width = 200,
-				},
-				{ widgetType = "indent", width = 20 }, { widgetType = "text", label = "How to use" }, { widgetType = "begin_rect", },
-                { widgetType = "indent", width = 10 },
-
-				{ widgetType = "text", wrapped = true, label = "Melee: Swing your right controller while holding melee weapon", },
-				{ widgetType = "text", wrapped = true, label = "Heavy Attack: Hold Right Trigger while swinging", },
-				{ widgetType = "text", wrapped = true, label = "Focus Attack: Hold Left Trigger to charge Focus, then press RB when charged", },
-				{ widgetType = "text", wrapped = true, label = "Counterattack: Press Right Trigger during the enemy's red counterattack cue", },
-				{ widgetType = "text", wrapped = true, label = "Physical Item Grab: Grip with an empty hand while a food or drink item shows its pickup prompt. Release next to your ear to take it, release elsewhere to drop or throw it", },
-				{ widgetType = "text", wrapped = true, label = "Interact: Left Grip while an interaction prompt shows LB", },
-
-				{ widgetType = "begin_group", id = "interaction_info_vanilla_plus_group", isHidden = true },
-					{ widgetType = "text", wrapped = true, label = "Jump: Right Stick forward", },
-					{ widgetType = "text", wrapped = true, label = "Block/Dodge: Right Stick backward", },
-				{ widgetType = "end_group", },
-
-				{ widgetType = "begin_group", id = "interaction_info_mixed_group", isHidden = true },
-					{ widgetType = "text", wrapped = true, label = "Inventory: Left Grip near ear", },
-					{ widgetType = "text", wrapped = true, label = "Heal: Left Grip near mouth", },
-					{ widgetType = "text", wrapped = true, label = "Rage: Left Trigger near eyes", },
-				{ widgetType = "end_group", },
-
-				{ widgetType = "begin_group", id = "interaction_info_full_group", isHidden = true },
-					{ widgetType = "text", wrapped = true, label = "Inventory: Left Grip near ear", },
-					{ widgetType = "text", wrapped = true, label = "Heal: Left Grip near mouth (no DPAD Down)", },
-					{ widgetType = "text", wrapped = true, label = "Rage: Left Trigger near eyes (no L3+R3)", },
-				{ widgetType = "end_group", },
-
-                { widgetType = "unindent", width = 10 },
-            	{ widgetType = "end_rect", additionalSize = 12, rounding = 5 }, { widgetType = "unindent", width = 20 },
-				{ widgetType = "new_line" },
+                -- {
+                --     widgetType = "checkbox",
+                --     id = "grip_interact",
+                --     label = "Left Grip For Interaction Prompts",
+                --     initialValue = true,
+                -- },
+				-- {
+				-- 	widgetType = "combo",
+				-- 	id = "interaction_control_mode",
+				-- 	label = "Interaction Controls",
+				-- 	selections = {"Vanilla", "Vanilla+", "Mixed", "Full Immersion"},
+				-- 	initialValue = 1,
+				-- 	width = 200,
+				-- },
 				expandArray(gestures.getConfigurationWidgets, {
 					select = {
-						{ id = "uevr_gesture_config_swipe_minThresholdSpeed", label = "Swing Effort Required", range = {100, 1000} },
+						{ id = "uevr_gesture_config_swing_minThresholdSpeed", label = "Melee Swing Effort Required", range = {100, 1000} },
 					},
 				}),
-                {
-                    widgetType = "combo",
-                    id = "flashlight_location",
-                    label = "Flashlight Location",
-                    selections = {"Head", "Left Hand", "Right Hand"},
-                    initialValue = 1,
-                },
-                { widgetType = "indent", width = 20 },
-                {
-                    widgetType = "drag_float3",
-                    id = "flashlight_head_position",
-                    label = "Flashlight Position",
-                    speed = 0.1,
-                    range = {-100, 100},
-                    initialValue = {0, 0, 0},
-                },
-                {
-                    widgetType = "drag_float3",
-                    id = "flashlight_head_rotation",
-                    label = "Flashlight Rotation",
-                    speed = 0.5,
-                    range = {-180, 180},
-                    initialValue = {0, 0, 0},
-                },
-                {
-                    widgetType = "drag_float3",
-                    id = "flashlight_left_position",
-                    label = "Flashlight Position",
-                    speed = 0.1,
-                    range = {-100, 100},
-                    initialValue = {0, 0, 0},
-                    isHidden = true,
-                },
-                {
-                    widgetType = "drag_float3",
-                    id = "flashlight_left_rotation",
-                    label = "Flashlight Rotation",
-                    speed = 0.5,
-                    range = {-180, 180},
-                    initialValue = {0, 0, 0},
-                    isHidden = true,
-                },
-                {
-                    widgetType = "drag_float3",
-                    id = "flashlight_right_position",
-                    label = "Flashlight Position",
-                    speed = 0.1,
-                    range = {-100, 100},
-                    initialValue = {0, 0, 0},
-                    isHidden = true,
-                },
-                {
-                    widgetType = "drag_float3",
-                    id = "flashlight_right_rotation",
-                    label = "Flashlight Rotation",
-                    speed = 0.5,
-                    range = {-180, 180},
-                    initialValue = {0, 0, 0},
-                    isHidden = true,
-                },
-				{ widgetType = "unindent", width = 20 },
 			{ widgetType = "end_rect", additionalSize = 12, rounding = 5 }, { widgetType = "unindent", width = 20 },
 			{ widgetType = "new_line" },
 			{ widgetType = "indent", width = 20 }, { widgetType = "text", label = "UI" }, { widgetType = "begin_rect", },
@@ -274,13 +155,6 @@ local configDefinition = {
 }
 
 local status = {}
-
--- local function toggleLumen()
--- 	uevrUtils.set_cvar_int("r.Lumen.DiffuseIndirect.Allow", 0)
--- 	delay(50, function()
--- 		uevrUtils.set_cvar_int("r.Lumen.DiffuseIndirect.Allow", 1)
--- 	end)
--- end
 
 
 local function updateBodyVisibility()
@@ -371,6 +245,9 @@ local suppressStepUpAtWalls = true
 local BLOCKED_SPEED = 50        -- below this while pushing, step-up turns off
 local FREE_SPEED = 100          -- above this, step-up turns back on
 local STEP_RETRY_INTERVAL = 0.5 -- seconds between single-frame step-up tries while blocked
+-- While pushing into a wall, acceleration reads 0 and speed jumps to 73-125 on single frames (measured
+-- 2026-11-22), so step-up comes back only after this many seconds without a blocked frame.
+local RELEASE_DELAY = 0.2
 local MOVE_WALKING = 1
 
 local function restoreStepUp()
@@ -381,19 +258,20 @@ local function restoreStepUp()
 	if cmc ~= nil then cmc.MaxStepHeight = stepUp.original end
 end
 
-uevr.sdk.callbacks.on_pre_engine_tick(function(engine, delta)
-	local cmc = uevrUtils.getValid(pawn, {"CharacterMovement"})
-
+local function handleStepUp(delta)
+	-- The movement component is looked up once per pawn, and per frame only checked for being freed
 	local stepUp = status.stepUp
-	if stepUp ~= nil and (cmc == nil or stepUp.address ~= cmc:get_address()) then
+	if stepUp ~= nil and (stepUp.pawn ~= pawn or uevrUtils.validate_object(stepUp.cmc) == nil) then
 		restoreStepUp()
 		stepUp = nil
 	end
-	if cmc == nil or not suppressStepUpAtWalls then
+	if not suppressStepUpAtWalls then
 		restoreStepUp()
 		return
 	end
 	if stepUp == nil then
+		local cmc = uevrUtils.getValid(pawn, {"CharacterMovement"})
+		if cmc == nil then return end
 		-- A script reset while suppressed leaves 0 behind, so fall back to the class default
 		local original = cmc.MaxStepHeight
 		if original == nil or original <= 0 then
@@ -403,18 +281,35 @@ uevr.sdk.callbacks.on_pre_engine_tick(function(engine, delta)
 			original = default
 			cmc.MaxStepHeight = default
 		end
-		stepUp = {cmc = cmc, address = cmc:get_address(), original = original, suppressed = false, blockedTime = 0}
+		stepUp = {pawn = pawn, cmc = cmc, original = original, suppressed = false, blockedTime = 0, freeTime = 0}
 		status.stepUp = stepUp
 	end
 
-	local accel = cmc:GetCurrentAcceleration()
-	local velocity = cmc.Velocity
-	local pushing = accel ~= nil and velocity ~= nil and cmc.MovementMode == MOVE_WALKING and accel.X * accel.X + accel.Y * accel.Y > 1
-	local speedSq = pushing and velocity.X * velocity.X + velocity.Y * velocity.Y or 0
+	-- Cheapest reads first. Acceleration is the property GetCurrentAcceleration() returns, without the UFunction call.
+	local cmc = stepUp.cmc
+	local pushing, speedSq = false, 0
+	if cmc.MovementMode == MOVE_WALKING then
+		local accel = cmc.Acceleration
+		if accel ~= nil and accel.X * accel.X + accel.Y * accel.Y > 1 then
+			local velocity = cmc.Velocity
+			if velocity ~= nil then
+				pushing = true
+				speedSq = velocity.X * velocity.X + velocity.Y * velocity.Y
+			end
+		end
+	end
 	local limit = stepUp.suppressed and FREE_SPEED or BLOCKED_SPEED
-	local suppress = pushing and speedSq < limit * limit
+	local dt = delta or 0
+	local suppress = stepUp.suppressed
+	if pushing and speedSq < limit * limit then
+		stepUp.freeTime = 0
+		suppress = true
+	else
+		stepUp.freeTime = stepUp.freeTime + dt
+		if stepUp.freeTime >= RELEASE_DELAY then suppress = false end
+	end
 	if suppress then
-		stepUp.blockedTime = stepUp.blockedTime + (delta or 0)
+		stepUp.blockedTime = stepUp.blockedTime + dt
 		if stepUp.blockedTime >= STEP_RETRY_INTERVAL then
 			stepUp.blockedTime = 0
 			suppress = false
@@ -426,6 +321,11 @@ uevr.sdk.callbacks.on_pre_engine_tick(function(engine, delta)
 		stepUp.suppressed = suppress
 		cmc.MaxStepHeight = suppress and 0 or stepUp.original
 	end
+end
+handleStepUp = uevrUtils.profiler:wrap("handleStepUp: ", handleStepUp)
+
+uevr.sdk.callbacks.on_pre_engine_tick(function(engine, delta)
+	handleStepUp(delta)
 end)
 ------------------- End step-up suppression at walls -------------------
 
@@ -789,33 +689,26 @@ setInterval(1000, function()
 		-- Arms keep the bones of the profile they were created with, so rebuild them for the new form.
 		regenerateHands(configui.getValue("hands_type") or 1)
 	end
-
-    -- local interacting, interactionType = getInteraction(pawn)
-    -- if status.interactionType ~= interactionType then
-    --     status.interactionType = interactionType
-    --     pawnModule.hideArmsBones(not interacting)
-    -- end
 end)
 
 
-local unlimitedAwaken = false
+-- local unlimitedAwaken = false
+-- uevr.sdk.callbacks.on_pre_engine_tick(function()
+--     -- Invincibility through the game's own component.
+-- 	local invincible = uevrUtils.getValid(pawn, {"NoceInvincible"})
+-- 	local token = uevrUtils.fname_from_string("UEVR_Invincible")
+-- 	if invincible ~= nil and not invincible:IsTokenInvincible(token) then
+-- 		invincible:StartInvincible(token)
+-- 	end
 
-uevr.sdk.callbacks.on_pre_engine_tick(function()
-    -- Invincibility through the game's own component.
-	local invincible = uevrUtils.getValid(pawn, {"NoceInvincible"})
-	local token = uevrUtils.fname_from_string("UEVR_Invincible")
-	if invincible ~= nil and not invincible:IsTokenInvincible(token) then
-		invincible:StartInvincible(token)
-	end
-
-	-- Keep Kudzu Seal / Awaken (ClawTransform) full so the mode never runs out.
-	if unlimitedAwaken then
-		local claw = uevrUtils.getValid(pawn, {"NocePlayerClawTransform"})
-		if claw ~= nil and not claw:IsClawTransformFull() then
-			claw:FillClawTransformToFull()
-		end
-	end
-end)
+-- 	-- Keep Kudzu Seal / Awaken (ClawTransform) full so the mode never runs out.
+-- 	if unlimitedAwaken then
+-- 		local claw = uevrUtils.getValid(pawn, {"NocePlayerClawTransform"})
+-- 		if claw ~= nil and not claw:IsClawTransformFull() then
+-- 			claw:FillClawTransformToFull()
+-- 		end
+-- 	end
+-- end)
 
 -- A sprint turns the body toward the stick, but the yaw lock below stops the body turning, so
 -- stick-back mid-sprint retries the turn-around forever. While the sprint is still in a moving
@@ -892,11 +785,16 @@ end)
 
 configui.onCreateOrUpdate("physical_item_grab", function(value)
 	interactions.setItemGrabEnabled(value)
-end)
-
-configui.onCreateOrUpdate("grip_interact", function(value)
 	interactions.setGripInteractEnabled(value)
 end)
+
+configui.onCreateOrUpdate("physical_interactions", function(value)
+	interactions.setPhysicalInteractionsEnabled(value)
+end)
+
+-- configui.onCreateOrUpdate("grip_interact", function(value)
+-- 	interactions.setGripInteractEnabled(value)
+-- end)
 
 ui.registerWidgetChangeCallback("WBP_SavePoint_C", function(active, widget)
 	regenerateHands(configui.getValue("hands_type") or 1)
@@ -907,14 +805,15 @@ ui.registerWidgetChangeCallback("WBP_GimmickInput_C", function(active, widget)
 	status.isGimmickInput = active
 end)
 
--- In LS_SC0101_L2_M, shots whose camera has a 37.5 degree FOV play in 2D screen mode.
+-- In LS_SC0101_L1_M and LS_SC0101_L2_M, shots whose camera has a 37.5 degree FOV play in 2D screen mode.
 -- Checked only when the view target changes. LevelSequenceActor is a native class, so the
 -- class lookup always succeeds and is cached.
+local twoDSequences = { LS_SC0101_L1_M = true, LS_SC0101_L2_M = true }
 local function isTwoDSequenceLoaded()
 	for _, actor in ipairs(uevrUtils.find_all_of("Class /Script/LevelSequence.LevelSequenceActor") or {}) do
 		local player = actor.SequencePlayer
 		local name = player ~= nil and player:GetSequenceName() or nil
-		if name ~= nil and name:gsub("%z", "") == "LS_SC0101_L2_M" then return true end
+		if name ~= nil and twoDSequences[(name:gsub("%z", ""))] then return true end
 	end
 	return false
 end
@@ -924,7 +823,8 @@ local function updateCutscene2D(target)
 	local use2D = camera ~= nil and math.abs(camera.FieldOfView - 37.5) < 0.1 and isTwoDSequenceLoaded()
 	if use2D == (status.isCutscene2D == true) then return end
 	status.isCutscene2D = use2D
-	uevrUtils.set_2D_mode(use2D)
+	uevrUtils.setUEVRParam("VR_Compatibility_AHUD", use2D and "true" or "false")
+	--uevrUtils.set_2D_mode(use2D)
 end
 
 -- A level sequence with a fade track restores the camera fade it saved when it started,
@@ -1005,16 +905,20 @@ end)
 
 configui.create(configDefinition)
 
-local isPaused = false
+-- local isPaused = false
+-- register_key_bind("F2", function()
+--     isPaused = not isPaused
+--     uevrUtils.pauseGame(isPaused)
+-- end)
+
+-- register_key_bind("F3", function()
+--     unlimitedAwaken = true
+--     delay(1000, function()
+--         unlimitedAwaken = false
+--     end)
+-- end)
+
 register_key_bind("F2", function()
-    isPaused = not isPaused
-    uevrUtils.pauseGame(isPaused)
+	print("F2 pressed")
+	pawn:K2_AddActorLocalOffset(uevrUtils.vector(50,50,50), false, reusable_hit_result, true)
 end)
-
-register_key_bind("F3", function()
-    unlimitedAwaken = true
-    delay(1000, function()
-        unlimitedAwaken = false
-    end)
-end)
-

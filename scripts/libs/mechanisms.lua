@@ -437,6 +437,8 @@ Usage
         mechanisms.setEntriesEnabled(value)         Enables or disables every mechanism made from a saved entry (default: enabled).
         mechanisms.setPaused(value), mechanisms.isPaused()     Mechanisms work as usual but never press the game's button
                                                     (the config UI's Disable Mechanisms).
+        mechanisms.setActive(value), mechanisms.isActive()     Off: every mechanism lets go and nothing in this module runs
+                                                    (default: on). Each mechanism's own enabled is kept.
         mechanisms.setScanOptimize(value)           The mechanisms not in use scan only while the game adapter's prompt.getPrompt
                                                     shows a prompt or its isScanNeeded says true (default: off). An adapter with
                                                     neither always scans.
@@ -1105,6 +1107,8 @@ local entriesVersion = 0
 local configDev = nil
 local adapter = nil
 local entriesEnabled = true
+-- Off (M.setActive): no mechanism runs, and none of this module's callbacks does any work.
+local active = true
 -- Mechanisms work as usual but never press the game's button (M.setPaused): for setting them up without the game acting on a test.
 local paused = false
 -- Scans skipped while the game shows no prompt and the game adapter's isScanNeeded doesn't say true (M.setScanOptimize). The
@@ -1854,7 +1858,7 @@ end
 updatePrompt = uevrUtils.profiler:wrap("MECHANISMS: updatePrompt", updatePrompt)
 
 local function onInput(retval, userIndex, state)
-	if paused or userIndex ~= 0 or state == nil or state.Gamepad == nil then return end
+	if not active or paused or userIndex ~= 0 or state == nil or state.Gamepad == nil then return end
 	for _, self in ipairs(instances) do
 		if self.engaged and self.driver.onInput ~= nil then
 			local actor = uevrUtils.getValid(self.actor)
@@ -1877,6 +1881,7 @@ end
 
 -- For libs/accessories: the hand spot a hand reached on an engaged mechanism is the accessory that hand is put on.
 local function getActiveSpot(hand)
+	if not active then return nil end
 	for _, self in ipairs(instances) do
 		if self.engaged and self.touching[hand] == true and self.spotID[hand] ~= nil and isHandReady(hand) then
 			return self.spotID[hand], SPOT_PRIORITY
@@ -1890,6 +1895,7 @@ getActiveSpot = uevrUtils.profiler:wrap("MECHANISMS: getActiveSpot", getActiveSp
 local ACCESSORY_TARGET_CALLBACK = "accessory_target"
 local targetAnswers = {}
 local function getAccessoryTargetAnswer(hand)
+	if not active then return nil end
 	local component, key = M.getAccessoryTarget(hand)
 	if component == nil then return nil end
 	local answer = targetAnswers[hand]
@@ -1903,6 +1909,7 @@ local function installHooks()
 	if hooksInstalled then return end
 	hooksInstalled = true
 	uevrUtils.registerPostEngineTickCallback(function(engine, delta)
+		if not active then return end
 		scanNeeded = nil
 		for _, self in ipairs(instances) do
 			update(self, tonumber(delta) or 0)
@@ -2860,6 +2867,17 @@ end
 
 function M.isPaused()
 	return paused
+end
+
+-- Off: every mechanism lets go (as on a level change) and nothing in this module runs until it is on again. Each mechanism's own
+-- enabled is kept.
+function M.setActive(value)
+	active = value == true
+	if not active then resetAll() end
+end
+
+function M.isActive()
+	return active
 end
 
 function M.setScanOptimize(value)

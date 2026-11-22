@@ -43,7 +43,7 @@ local HANDS = {Handed.Left, Handed.Right}
 -- pendingCollect: interactables released at the ear, picked up on the next tick
 -- moved: interactable address -> {actor, wait, rest, offset, home}, items in a hand or released and not yet at rest; an item is
 --   removed once it has come to rest, so this only ever holds the few items in play
-local status = {bodies = {}, hiddenPickups = {}, pendingCollect = {}, moved = {}}
+local status = {bodies = {}, hiddenPickups = {}, pendingCollect = {}, moved = {}, interactionsEnabled = true}
 
 grabbable.useRealPhysics(true)
 
@@ -753,6 +753,8 @@ uevrUtils.registerUEVRCallback("on_accessory_animation", function(handed, anim)
 end)
 
 uevrUtils.registerPostEngineTickCallback(function()
+	-- Physical Interactions off: nothing to do once a pose that was applied has been put back.
+	if not status.interactionsEnabled and next(status.ladderGripPose) == nil then return end
 	for _, hand in ipairs(HANDS) do
 		-- What the hand is on changes only as it grabs or lets go: the stage's choice is read then, not on every tick.
 		local mechanism = mechanisms.getEngagedMechanism(hand)
@@ -832,11 +834,18 @@ mechanisms.setGameAdapter({
 	end,
 })
 
-function M.setPhysicalDoorEnabled(value)
+-- Every mechanism made from a saved entry (doors, ladders, ...).
+function M.setPhysicalEntriesEnabled(value)
 	mechanisms.setEntriesEnabled(value == true)
 end
 
-M.setPhysicalDoorEnabled(true)
+M.setPhysicalEntriesEnabled(true)
+
+-- The config UI's Physical Interactions: off, libs/mechanisms does nothing at all.
+function M.setPhysicalInteractionsEnabled(value)
+	status.interactionsEnabled = value == true
+	mechanisms.setActive(status.interactionsEnabled)
+end
 
 -- Scan optimize: mechanisms not in use only look for their actors while the game shows a prompt or the adapter's isScanNeeded
 -- says so. Set false if a

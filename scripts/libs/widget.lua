@@ -267,6 +267,15 @@ local function liveSlot(image)
 	return isSameLiveObject(image.slot, image.slotName) and image.slot or nil
 end
 
+-- Newer engines (for example Silent Hill f) replaced UImage SetBrushSize with SetDesiredSizeOverride
+local function setBrushSize(widget, size)
+	if widget.SetBrushSize ~= nil then
+		widget:SetBrushSize(size)
+	elseif widget.SetDesiredSizeOverride ~= nil then
+		widget:SetDesiredSizeOverride(size)
+	end
+end
+
 -- Collapsed while hidden or while there is nothing to draw
 local function updateImageVisibility(image)
 	local widget = liveImage(image)
@@ -288,7 +297,7 @@ function Image:setTextureObject(texture)
 	local widget = liveImage(self)
 	if widget ~= nil then
 		widget:SetBrushFromTexture(texture, true)
-		widget:SetBrushSize(self.drawSize)
+		setBrushSize(widget, self.drawSize)
 		updateImageVisibility(self)
 		local slot = liveSlot(self)
 		if slot ~= nil then
@@ -337,7 +346,7 @@ function Image:setSize(size2D)
 	self.drawSize = uevrUtils.vector2D(size2D.X, size2D.Y)
 	local widget = liveImage(self)
 	if widget ~= nil then
-		widget:SetBrushSize(self.drawSize)
+		setBrushSize(widget, self.drawSize)
 		local slot = liveSlot(self)
 		if slot ~= nil then
 			slot:SetSize(self.drawSize)
@@ -387,7 +396,7 @@ function Image:addToWidget(widget, opts)
 		if self.texture ~= nil then
 			self.image:SetBrushFromTexture(self.texture, true)
 		end
-		self.image:SetBrushSize(self.drawSize)
+		setBrushSize(self.image, self.drawSize)
 		if self.color ~= nil then
 			self.image:SetColorAndOpacity(linearColorFromHex(self.color))
 		end
